@@ -193,43 +193,29 @@ def _find_english_code(lang_dict: dict[str, list[dict]]) -> str | None:
     return None
 
 
-@with_retry(max_retries=3, retryable=_RETRYABLE_ERRORS)
-def list_captions(video_id: str) -> CaptionInfo:
-    """List available English captions and determine their type.
+def _classify_captions(
+    manual_subs: dict[str, list[dict]],
+    auto_subs: dict[str, list[dict]],
+) -> CaptionInfo:
+    """Classify available captions as manual, auto-only, or none.
 
-    Checks manual subtitles first, then auto-generated.
-    Only manual captions are accepted for processing.
+    Implements the branching logic from design doc section 5.2:
+    - Manual English captions found -> return CaptionInfo
+    - Auto-generated only -> raise AutoCaptionOnlyError
+    - No English captions at all -> raise CaptionNotFoundError
 
     Args:
-        video_id: 11-character YouTube video ID.
+        manual_subs: yt-dlp 'subtitles' dict.
+        auto_subs: yt-dlp 'automatic_captions' dict.
 
     Returns:
-        CaptionInfo with the selected language code and type.
+        CaptionInfo for the selected manual English caption.
 
     Raises:
         CaptionNotFoundError: No English captions at all.
         AutoCaptionOnlyError: Only auto-generated English captions exist.
-        RetryExhaustedError: Network failures exhausted all retries.
     """
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "writesubtitles": False,
-        "writeautomaticsub": False,
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-
-    if info is None:
-        raise yt_dlp.utils.DownloadError(f"Failed to fetch info for {video_id}")
-
-    manual_subs: dict = info.get("subtitles") or {}
-    auto_subs: dict = info.get("automatic_captions") or {}
-
-    # Check manual subtitles first
+    # Check manual subtitles first (design doc 5.4: manual only, ignore auto)
     manual_en = _find_english_code(manual_subs)
     if manual_en is not None:
         all_en_codes = [c for c in manual_subs if c == "en" or c.startswith("en-")]
@@ -260,3 +246,42 @@ def list_captions(video_id: str) -> CaptionInfo:
         "\n"
         "Aborting extraction."
     )
+
+
+@with_retry(max_retries=3, retryable=_RETRYABLE_ERRORS)
+def list_captions(video_id: str) -> CaptionInfo:
+    """List available English captions and validate their type.
+
+    Fetches subtitle info via yt-dlp then classifies captions.
+    Only manual English captions are accepted for processing.
+
+    Args:
+        video_id: 11-character YouTube video ID.
+
+    Returns:
+        CaptionInfo with the selected language code and type.
+
+    Raises:
+        CaptionNotFoundError: No English captions at all.
+        AutoCaptionOnlyError: Only auto-generated English captions exist.
+        RetryExhaustedError: Network failures exhausted all retries.
+    """
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "writesubtitles": False,
+        "writeautomaticsub": False,
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    if info is None:
+        raise yt_dlp.utils.DownloadError(f"Failed to fetch info for {video_id}")
+
+    manual_subs: dict = info.get("subtitles") or {}
+    auto_subs: dict = info.get("automatic_captions") or {}
+
+    return _classify_captions(manual_subs, auto_subs)
