@@ -2,9 +2,13 @@
 
 from pathlib import Path
 
+import pytest
+
 from yt_excel.vtt import (
     Segment,
+    filter_short_segments,
     parse_vtt,
+    process_segments,
     remove_non_verbal,
     remove_non_verbal_segments,
     strip_markup,
@@ -385,3 +389,157 @@ class TestRemoveNonVerbalSegments:
         result = remove_non_verbal_segments(segments)
         assert len(result) == 1
         assert result[0].english == "Thank you! Great."
+
+
+# --- filter_short_segments tests ---
+
+
+class TestFilterShortDuration:
+    """Test filtering by minimum duration."""
+
+    def test_removes_short_duration(self) -> None:
+        segments = [
+            Segment(1, "00:00:01.000", "00:00:01.300", "Hi"),  # 0.3s < 0.5s
+            Segment(2, "00:00:02.000", "00:00:05.000", "Hello world"),  # 3.0s
+        ]
+        result = filter_short_segments(segments)
+        assert len(result) == 1
+        assert result[0].english == "Hello world"
+
+    def test_boundary_exactly_05_kept(self) -> None:
+        segments = [
+            Segment(1, "00:00:01.000", "00:00:01.500", "OK"),  # exactly 0.5s
+        ]
+        result = filter_short_segments(segments)
+        assert len(result) == 1
+
+    def test_boundary_just_under_05_removed(self) -> None:
+        segments = [
+            Segment(1, "00:00:01.000", "00:00:01.499", "OK"),  # 0.499s
+        ]
+        result = filter_short_segments(segments)
+        assert len(result) == 0
+
+    def test_custom_min_duration(self) -> None:
+        segments = [
+            Segment(1, "00:00:01.000", "00:00:01.800", "Hello"),  # 0.8s
+        ]
+        result = filter_short_segments(segments, min_duration_sec=1.0)
+        assert len(result) == 0
+
+
+class TestFilterShortText:
+    """Test filtering by minimum text length."""
+
+    def test_single_char_removed(self) -> None:
+        segments = [
+            Segment(1, "00:00:01.000", "00:00:05.000", "A"),  # 1 char < 2
+        ]
+        result = filter_short_segments(segments)
+        assert len(result) == 0
+
+    def test_two_chars_kept(self) -> None:
+        segments = [
+            Segment(1, "00:00:01.000", "00:00:05.000", "OK"),  # 2 chars
+        ]
+        result = filter_short_segments(segments)
+        assert len(result) == 1
+
+    def test_empty_text_removed(self) -> None:
+        segments = [
+            Segment(1, "00:00:01.000", "00:00:05.000", ""),
+        ]
+        result = filter_short_segments(segments)
+        assert len(result) == 0
+
+    def test_custom_min_text_length(self) -> None:
+        segments = [
+            Segment(1, "00:00:01.000", "00:00:05.000", "Hi"),  # 2 chars
+        ]
+        result = filter_short_segments(segments, min_text_length=3)
+        assert len(result) == 0
+
+
+class TestFilterShortReindex:
+    """Test reindexing after filtering."""
+
+    def test_reindexes_correctly(self) -> None:
+        segments = [
+            Segment(1, "00:00:01.000", "00:00:01.200", "X"),      # filtered (both)
+            Segment(2, "00:00:02.000", "00:00:05.000", "Hello"),   # kept
+            Segment(3, "00:00:06.000", "00:00:06.100", "Y"),       # filtered (duration)
+            Segment(4, "00:00:07.000", "00:00:10.000", "World"),   # kept
+        ]
+        result = filter_short_segments(segments)
+        assert len(result) == 2
+        assert result[0].index == 1
+        assert result[0].english == "Hello"
+        assert result[1].index == 2
+        assert result[1].english == "World"
+
+
+class TestFilterShortTimestampParsing:
+    """Test timestamp parsing edge cases."""
+
+    def test_hours_in_timestamp(self) -> None:
+        segments = [
+            Segment(1, "01:30:00.000", "01:30:03.000", "Long video segment"),
+        ]
+        result = filter_short_segments(segments)
+        assert len(result) == 1
+
+    def test_millisecond_precision(self) -> None:
+        segments = [
+            Segment(1, "00:00:01.001", "00:00:01.502", "Just enough"),  # 0.501s
+        ]
+        result = filter_short_segments(segments)
+        assert len(result) == 1
+
+
+# --- process_segments (full pipeline) tests ---
+
+
+class TestProcessSegments:
+    """Test the full segment processing pipeline."""
+
+    def test_mixed_complex_fixture(self) -> None:
+        content = _read_fixture("mixed_complex.vtt")
+        segments = parse_vtt(content)
+        result = process_segments(segments)
+        # After processing:
+        # - [Music] (0.3s, non-verbal) -> removed
+        # - "Hello & welcome to this video." (3.5s) -> kept
+        # - "Today we're going to learn" (3.2s) -> kept
+        # - "A" (0.2s, short duration + short text) -> removed
+        # - "DNA is the blueprint" (3.8s) -> kept
+        # - empty (0.1s) -> removed
+        # - "Thank you for watching!" (3.0s) -> kept
+        assert len(result) >= 3
+        texts = [s.english for s in result]
+        assert any("Hello" in t and "welcome" in t for t in texts)
+        assert any("Thank you" in t for t in texts)
+        # No non-verbal or tags should remain
+        for seg in result:
+            assert "[Music]" not in seg.english
+            assert "<" not in seg.english
+
+    def test_all_filtered_raises_error(self) -> None:
+        segments = [
+            Segment(1, "00:00:00.000", "00:00:00.200", "[Music]"),
+        ]
+        with pytest.raises(ValueError, match="No valid spoken segments"):
+            process_segments(segments)
+
+    def test_preserves_timestamps_through_pipeline(self) -> None:
+        content = _read_fixture("basic.vtt")
+        segments = parse_vtt(content)
+        result = process_segments(segments)
+        assert result[0].start == "00:00:01.000"
+        assert result[0].end == "00:00:04.500"
+
+    def test_indices_sequential_after_pipeline(self) -> None:
+        content = _read_fixture("basic.vtt")
+        segments = parse_vtt(content)
+        result = process_segments(segments)
+        for i, seg in enumerate(result, 1):
+            assert seg.index == i

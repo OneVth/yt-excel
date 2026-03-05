@@ -250,3 +250,83 @@ def remove_non_verbal_segments(segments: list[Segment]) -> list[Segment]:
             ))
             index += 1
     return result
+
+
+# --- Short Segment Filter ---
+
+
+def _timestamp_to_seconds(ts: str) -> float:
+    """Convert HH:MM:SS.mmm timestamp to seconds."""
+    parts = ts.split(":")
+    hours = int(parts[0])
+    minutes = int(parts[1])
+    sec_parts = parts[2].split(".")
+    seconds = int(sec_parts[0])
+    millis = int(sec_parts[1]) if len(sec_parts) > 1 else 0
+    return hours * 3600 + minutes * 60 + seconds + millis / 1000
+
+
+def filter_short_segments(
+    segments: list[Segment],
+    min_duration_sec: float = 0.5,
+    min_text_length: int = 2,
+) -> list[Segment]:
+    """Filter out segments that are too short in duration or text length.
+
+    Args:
+        segments: List of Segment objects (should be fully processed).
+        min_duration_sec: Minimum segment duration in seconds (default 0.5).
+        min_text_length: Minimum text length in characters (default 2).
+
+    Returns:
+        New list excluding short segments. Remaining segments are reindexed.
+    """
+    result: list[Segment] = []
+    index = 1
+    for seg in segments:
+        duration = _timestamp_to_seconds(seg.end) - _timestamp_to_seconds(seg.start)
+        if duration < min_duration_sec:
+            continue
+        if len(seg.english) < min_text_length:
+            continue
+        result.append(Segment(
+            index=index,
+            start=seg.start,
+            end=seg.end,
+            english=seg.english,
+        ))
+        index += 1
+    return result
+
+
+def process_segments(
+    segments: list[Segment],
+    min_duration_sec: float = 0.5,
+    min_text_length: int = 2,
+) -> list[Segment]:
+    """Apply the full processing pipeline to parsed VTT segments.
+
+    Processing order (per design doc 6.2):
+    1. Markup stripping (HTML/WebVTT tags, entities)
+    2. Non-verbal text removal
+    3. Short segment filtering
+
+    Args:
+        segments: Raw parsed segments from parse_vtt().
+        min_duration_sec: Minimum segment duration for filtering.
+        min_text_length: Minimum text length for filtering.
+
+    Returns:
+        Fully processed segment list, reindexed.
+
+    Raises:
+        ValueError: If no valid segments remain after processing.
+    """
+    result = strip_markup_segments(segments)
+    result = remove_non_verbal_segments(result)
+    result = filter_short_segments(result, min_duration_sec, min_text_length)
+
+    if not result:
+        raise ValueError("No valid spoken segments remain after filtering.")
+
+    return result
