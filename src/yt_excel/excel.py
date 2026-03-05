@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import openpyxl
@@ -357,3 +358,112 @@ def write_data_sheet(
         ws.cell(row=row_num, column=5, value=seg.korean)
 
     return ws
+
+
+# --- Metadata Writer ---
+
+
+@dataclass
+class MetadataRow:
+    """Data for a single _metadata row (13 fields).
+
+    Attributes correspond to METADATA_HEADERS columns in order.
+    """
+
+    video_id: str
+    video_title: str
+    video_url: str
+    channel_name: str
+    video_duration: str
+    sheet_name: str
+    processed_at: str  # ISO 8601
+    total_segments: int
+    filtered_segments: int
+    translation_success: int
+    translation_failed: int
+    model_used: str
+    tool_version: str
+
+
+def write_metadata_row(wb: Workbook, row_data: MetadataRow) -> None:
+    """Append a row to the _metadata sheet.
+
+    Args:
+        wb: Workbook containing _metadata sheet.
+        row_data: MetadataRow with all 13 fields.
+    """
+    ws = wb[METADATA_SHEET]
+    next_row = ws.max_row + 1
+
+    values = [
+        row_data.video_id,
+        row_data.video_title,
+        row_data.video_url,
+        row_data.channel_name,
+        row_data.video_duration,
+        row_data.sheet_name,
+        row_data.processed_at,
+        row_data.total_segments,
+        row_data.filtered_segments,
+        row_data.translation_success,
+        row_data.translation_failed,
+        row_data.model_used,
+        row_data.tool_version,
+    ]
+
+    for col_idx, value in enumerate(values, start=1):
+        ws.cell(row=next_row, column=col_idx, value=value)
+
+
+# --- Study Log Writer ---
+
+
+def _format_duration_mmss(duration_hhmmss: str) -> str:
+    """Convert HH:MM:SS to MM:SS format for study log."""
+    parts = duration_hhmmss.split(":")
+    if len(parts) == 3:
+        hours = int(parts[0])
+        minutes = int(parts[1]) + hours * 60
+        seconds = parts[2]
+        return f"{minutes:02d}:{seconds}"
+    return duration_hhmmss
+
+
+def write_study_log_row(
+    wb: Workbook,
+    video_title: str,
+    video_duration: str,
+    total_segments: int,
+) -> None:
+    """Append a row to the _study_log sheet.
+
+    CLI only writes the first 5 auto-generated fields (No, Study Date,
+    Video Title, Duration, Segments) plus default values for Status and
+    Review Count. Notes is left empty. CLI never reads or modifies
+    existing rows.
+
+    Args:
+        wb: Workbook containing _study_log sheet.
+        video_title: Video title string.
+        video_duration: Duration in HH:MM:SS format.
+        total_segments: Number of segments after filtering.
+    """
+    ws = wb[STUDY_LOG_SHEET]
+    next_row = ws.max_row + 1
+
+    # Auto-increment No (find last No value)
+    last_no = 0
+    if next_row > 2:
+        prev_no = ws.cell(row=next_row - 1, column=1).value
+        if isinstance(prev_no, (int, float)):
+            last_no = int(prev_no)
+    new_no = last_no + 1
+
+    ws.cell(row=next_row, column=1, value=new_no)
+    ws.cell(row=next_row, column=2, value=date.today().isoformat())
+    ws.cell(row=next_row, column=3, value=video_title)
+    ws.cell(row=next_row, column=4, value=_format_duration_mmss(video_duration))
+    ws.cell(row=next_row, column=5, value=total_segments)
+    ws.cell(row=next_row, column=6, value="Not Started")
+    ws.cell(row=next_row, column=7, value=0)
+    # Column 8 (Notes) left empty

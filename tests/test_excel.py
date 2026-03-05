@@ -3,12 +3,15 @@
 import openpyxl
 import pytest
 
+from datetime import date
+
 from yt_excel.excel import (
     DATA_HEADERS,
     DuplicateVideoError,
     FileLockError,
     METADATA_HEADERS,
     METADATA_SHEET,
+    MetadataRow,
     STUDY_LOG_HEADERS,
     STUDY_LOG_SHEET,
     InitResult,
@@ -18,6 +21,8 @@ from yt_excel.excel import (
     initialize_workbook,
     sanitize_sheet_name,
     write_data_sheet,
+    write_metadata_row,
+    write_study_log_row,
 )
 from yt_excel.vtt import Segment
 
@@ -440,3 +445,125 @@ class TestWriteDataSheet:
         ws = wb["Test Sheet"]
         # openpyxl stores empty strings as None
         assert ws.cell(row=2, column=5).value is None or ws.cell(row=2, column=5).value == ""
+
+
+def _make_metadata_row(**overrides) -> MetadataRow:
+    """Helper to create a MetadataRow with defaults."""
+    defaults = {
+        "video_id": "dQw4w9WgXcQ",
+        "video_title": "How DNA Works",
+        "video_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "channel_name": "TED-Ed",
+        "video_duration": "00:04:52",
+        "sheet_name": "How DNA Works",
+        "processed_at": "2026-03-05T12:00:00",
+        "total_segments": 131,
+        "filtered_segments": 11,
+        "translation_success": 131,
+        "translation_failed": 0,
+        "model_used": "gpt-5-nano",
+        "tool_version": "0.1.0",
+    }
+    defaults.update(overrides)
+    return MetadataRow(**defaults)
+
+
+class TestWriteMetadataRow:
+    """Tests for write_metadata_row — appending to _metadata sheet."""
+
+    def test_writes_all_13_fields(self, tmp_path):
+        """All 13 metadata fields are written correctly."""
+        path = tmp_path / "Master.xlsx"
+        initialize_workbook(path)
+        wb = openpyxl.load_workbook(str(path))
+
+        row_data = _make_metadata_row()
+        write_metadata_row(wb, row_data)
+        wb.save(str(path))
+
+        wb = openpyxl.load_workbook(str(path))
+        ws = wb[METADATA_SHEET]
+
+        assert ws.cell(row=2, column=1).value == "dQw4w9WgXcQ"
+        assert ws.cell(row=2, column=2).value == "How DNA Works"
+        assert ws.cell(row=2, column=3).value == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        assert ws.cell(row=2, column=4).value == "TED-Ed"
+        assert ws.cell(row=2, column=5).value == "00:04:52"
+        assert ws.cell(row=2, column=6).value == "How DNA Works"
+        assert ws.cell(row=2, column=7).value == "2026-03-05T12:00:00"
+        assert ws.cell(row=2, column=8).value == 131
+        assert ws.cell(row=2, column=9).value == 11
+        assert ws.cell(row=2, column=10).value == 131
+        assert ws.cell(row=2, column=11).value == 0
+        assert ws.cell(row=2, column=12).value == "gpt-5-nano"
+        assert ws.cell(row=2, column=13).value == "0.1.0"
+
+    def test_appends_to_next_row(self, tmp_path):
+        """Multiple metadata rows are appended sequentially."""
+        path = tmp_path / "Master.xlsx"
+        initialize_workbook(path)
+        wb = openpyxl.load_workbook(str(path))
+
+        write_metadata_row(wb, _make_metadata_row(video_id="first_vid_01"))
+        write_metadata_row(wb, _make_metadata_row(video_id="second_vid02"))
+        wb.save(str(path))
+
+        wb = openpyxl.load_workbook(str(path))
+        ws = wb[METADATA_SHEET]
+        assert ws.cell(row=2, column=1).value == "first_vid_01"
+        assert ws.cell(row=3, column=1).value == "second_vid02"
+
+
+class TestWriteStudyLogRow:
+    """Tests for write_study_log_row — appending to _study_log sheet."""
+
+    def test_writes_auto_fields_and_defaults(self, tmp_path):
+        """Writes No, Study Date, Title, Duration, Segments, Status, Review Count."""
+        path = tmp_path / "Master.xlsx"
+        initialize_workbook(path)
+        wb = openpyxl.load_workbook(str(path))
+
+        write_study_log_row(wb, "How DNA Works", "00:04:52", 131)
+        wb.save(str(path))
+
+        wb = openpyxl.load_workbook(str(path))
+        ws = wb[STUDY_LOG_SHEET]
+
+        assert ws.cell(row=2, column=1).value == 1  # No
+        assert ws.cell(row=2, column=2).value == date.today().isoformat()  # Study Date
+        assert ws.cell(row=2, column=3).value == "How DNA Works"  # Video Title
+        assert ws.cell(row=2, column=4).value == "04:52"  # Duration (MM:SS)
+        assert ws.cell(row=2, column=5).value == 131  # Segments
+        assert ws.cell(row=2, column=6).value == "Not Started"  # Status
+        assert ws.cell(row=2, column=7).value == 0  # Review Count
+        # Notes should be empty
+        assert ws.cell(row=2, column=8).value is None
+
+    def test_auto_increments_no(self, tmp_path):
+        """No field auto-increments for each new row."""
+        path = tmp_path / "Master.xlsx"
+        initialize_workbook(path)
+        wb = openpyxl.load_workbook(str(path))
+
+        write_study_log_row(wb, "Video 1", "00:05:00", 100)
+        write_study_log_row(wb, "Video 2", "00:10:00", 200)
+        wb.save(str(path))
+
+        wb = openpyxl.load_workbook(str(path))
+        ws = wb[STUDY_LOG_SHEET]
+        assert ws.cell(row=2, column=1).value == 1
+        assert ws.cell(row=3, column=1).value == 2
+
+    def test_duration_format_conversion(self, tmp_path):
+        """HH:MM:SS duration is converted to MM:SS."""
+        path = tmp_path / "Master.xlsx"
+        initialize_workbook(path)
+        wb = openpyxl.load_workbook(str(path))
+
+        write_study_log_row(wb, "Long Video", "01:30:45", 500)
+        wb.save(str(path))
+
+        wb = openpyxl.load_workbook(str(path))
+        ws = wb[STUDY_LOG_SHEET]
+        # 1 hour 30 minutes = 90 minutes
+        assert ws.cell(row=2, column=4).value == "90:45"
