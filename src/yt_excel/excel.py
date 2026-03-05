@@ -311,3 +311,49 @@ def generate_unique_sheet_name(
             return candidate
 
         counter += 1
+
+
+# --- Data Sheet Writer ---
+
+
+def write_data_sheet(
+    wb: Workbook,
+    sheet_name: str,
+    segments: list,
+) -> Worksheet:
+    """Create a data sheet and write segment rows.
+
+    Creates the sheet with headers (Index, Start, End, English, Korean)
+    and writes one row per segment. Timestamps are stored as text to
+    prevent Excel from auto-converting to time format.
+
+    Args:
+        wb: The workbook to add the sheet to.
+        sheet_name: Name for the new sheet (must be pre-sanitized).
+        segments: List of Segment objects with index, start, end, english, korean.
+
+    Returns:
+        The created worksheet.
+    """
+    ws = wb.create_sheet(sheet_name)
+
+    # Write headers
+    _write_header_row(ws, DATA_HEADERS)
+
+    # Write data rows
+    for seg in segments:
+        row_num = seg.index + 1  # +1 for header row
+
+        ws.cell(row=row_num, column=1, value=seg.index)
+
+        # Timestamps stored as text — set number format to prevent conversion
+        start_cell = ws.cell(row=row_num, column=2, value=seg.start)
+        start_cell.number_format = "@"
+
+        end_cell = ws.cell(row=row_num, column=3, value=seg.end)
+        end_cell.number_format = "@"
+
+        ws.cell(row=row_num, column=4, value=seg.english)
+        ws.cell(row=row_num, column=5, value=seg.korean)
+
+    return ws

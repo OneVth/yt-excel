@@ -17,7 +17,9 @@ from yt_excel.excel import (
     generate_unique_sheet_name,
     initialize_workbook,
     sanitize_sheet_name,
+    write_data_sheet,
 )
+from yt_excel.vtt import Segment
 
 
 class TestInitializeWorkbook:
@@ -340,3 +342,101 @@ class TestGenerateUniqueSheetName:
         result = generate_unique_sheet_name(title, existing)
         assert len(result) <= 31
         assert "(2)" in result
+
+
+def _make_segments(count=3):
+    """Helper to create test segments."""
+    return [
+        Segment(
+            index=i + 1,
+            start=f"00:00:{i:02d}.000",
+            end=f"00:00:{i + 1:02d}.000",
+            english=f"Hello world {i + 1}",
+            korean=f"안녕 세계 {i + 1}",
+        )
+        for i in range(count)
+    ]
+
+
+class TestWriteDataSheet:
+    """Tests for write_data_sheet — segment data writing."""
+
+    def test_writes_headers(self, tmp_path):
+        """Data sheet has correct column headers."""
+        path = tmp_path / "Master.xlsx"
+        initialize_workbook(path)
+        wb = openpyxl.load_workbook(str(path))
+
+        segments = _make_segments(1)
+        write_data_sheet(wb, "Test Sheet", segments)
+        wb.save(str(path))
+
+        wb = openpyxl.load_workbook(str(path))
+        ws = wb["Test Sheet"]
+        headers = [ws.cell(row=1, column=i).value for i in range(1, 6)]
+        assert headers == DATA_HEADERS
+
+    def test_writes_segment_data(self, tmp_path):
+        """Each segment is written to the correct row and column."""
+        path = tmp_path / "Master.xlsx"
+        initialize_workbook(path)
+        wb = openpyxl.load_workbook(str(path))
+
+        segments = _make_segments(3)
+        write_data_sheet(wb, "Test Sheet", segments)
+        wb.save(str(path))
+
+        wb = openpyxl.load_workbook(str(path))
+        ws = wb["Test Sheet"]
+
+        # Check row 2 (segment 1)
+        assert ws.cell(row=2, column=1).value == 1
+        assert ws.cell(row=2, column=2).value == "00:00:00.000"
+        assert ws.cell(row=2, column=3).value == "00:00:01.000"
+        assert ws.cell(row=2, column=4).value == "Hello world 1"
+        assert ws.cell(row=2, column=5).value == "안녕 세계 1"
+
+        # Check row 4 (segment 3)
+        assert ws.cell(row=4, column=1).value == 3
+        assert ws.cell(row=4, column=4).value == "Hello world 3"
+
+    def test_timestamp_stored_as_text(self, tmp_path):
+        """Timestamp cells use text format (@) to prevent auto-conversion."""
+        path = tmp_path / "Master.xlsx"
+        initialize_workbook(path)
+        wb = openpyxl.load_workbook(str(path))
+
+        segments = _make_segments(1)
+        write_data_sheet(wb, "Test Sheet", segments)
+        wb.save(str(path))
+
+        wb = openpyxl.load_workbook(str(path))
+        ws = wb["Test Sheet"]
+
+        # Start and End cells should be text format
+        assert ws.cell(row=2, column=2).number_format == "@"
+        assert ws.cell(row=2, column=3).number_format == "@"
+        # Values should be strings
+        assert isinstance(ws.cell(row=2, column=2).value, str)
+        assert isinstance(ws.cell(row=2, column=3).value, str)
+
+    def test_empty_korean_for_failed_translation(self, tmp_path):
+        """Segments with empty korean field are stored correctly."""
+        path = tmp_path / "Master.xlsx"
+        initialize_workbook(path)
+        wb = openpyxl.load_workbook(str(path))
+
+        segments = [Segment(
+            index=1,
+            start="00:00:01.000",
+            end="00:00:02.000",
+            english="Some text",
+            korean="",
+        )]
+        write_data_sheet(wb, "Test Sheet", segments)
+        wb.save(str(path))
+
+        wb = openpyxl.load_workbook(str(path))
+        ws = wb["Test Sheet"]
+        # openpyxl stores empty strings as None
+        assert ws.cell(row=2, column=5).value is None or ws.cell(row=2, column=5).value == ""
