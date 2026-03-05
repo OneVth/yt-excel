@@ -3,10 +3,76 @@
 import argparse
 import sys
 
+from rich.console import Console
+
 from yt_excel import __version__
 from yt_excel.config import load_config
-from yt_excel.environment import validate_api_key
-from yt_excel.youtube import extract_video_id
+
+
+# --- Output Utility ---
+
+_console = Console(stderr=True)
+
+
+class Output:
+    """Rich-based CLI output utility with log level filtering.
+
+    Manages output verbosity based on mode (normal/verbose/quiet)
+    and provides consistent emoji-prefixed messages per design doc 13.3.
+    """
+
+    def __init__(self, mode: str = "normal") -> None:
+        self.mode = mode
+
+    def success(self, message: str, indent: int = 0) -> None:
+        """Print a success message (green checkmark)."""
+        if self.mode == "quiet":
+            return
+        prefix = "   " * indent
+        _console.print(f"{prefix}[green]\u2705 {message}[/green]")
+
+    def info(self, message: str, indent: int = 0) -> None:
+        """Print an info message (blue info icon)."""
+        if self.mode == "quiet":
+            return
+        prefix = "   " * indent
+        _console.print(f"{prefix}[blue]\u2139 {message}[/blue]")
+
+    def warning(self, message: str, indent: int = 0) -> None:
+        """Print a warning message (yellow warning icon)."""
+        prefix = "   " * indent
+        _console.print(f"{prefix}[yellow]\u26a0 {message}[/yellow]")
+
+    def error(self, message: str, indent: int = 0) -> None:
+        """Print an error message (red cross)."""
+        prefix = "   " * indent
+        _console.print(f"{prefix}[red]\u274c {message}[/red]")
+
+    def step(self, emoji: str, message: str) -> None:
+        """Print a pipeline step header (e.g. emoji + description)."""
+        if self.mode == "quiet":
+            return
+        _console.print(f"\n{emoji} {message}")
+
+    def detail(self, message: str, indent: int = 1) -> None:
+        """Print an indented detail line (shown in normal and verbose modes)."""
+        if self.mode == "quiet":
+            return
+        prefix = "   " * indent
+        _console.print(f"{prefix}{message}")
+
+    def verbose(self, message: str, indent: int = 1) -> None:
+        """Print a verbose-only detail line."""
+        if self.mode != "verbose":
+            return
+        prefix = "   " * indent
+        _console.print(f"{prefix}[dim]{message}[/dim]")
+
+    def blank(self) -> None:
+        """Print a blank line."""
+        if self.mode == "quiet":
+            return
+        _console.print()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -79,22 +145,26 @@ def main() -> None:
     if args.quiet:
         config.ui.default_mode = "quiet"
 
+    out = Output(config.ui.default_mode)
+
     # API key validation (skip in dry-run mode)
     if not args.dry_run:
-        validate_api_key()
+        from yt_excel.environment import validate_api_key
+
+        try:
+            validate_api_key()
+        except SystemExit as e:
+            out.error(str(e))
+            sys.exit(1)
+        out.step("\U0001f511", "API key verified")
 
     # URL parsing
+    from yt_excel.youtube import extract_video_id
+
     try:
         video_id = extract_video_id(args.url)
     except ValueError as e:
-        print(f"\u274c ERROR: {e}", file=sys.stderr)
+        out.error(f"ERROR: {e}")
         sys.exit(1)
 
-    # Phase 1: output parsed info for verification
-    if config.ui.default_mode != "quiet":
-        print(f"\U0001f50d Video ID: {video_id}")
-        print(f"   Master: {config.file.master_path}")
-        print(f"   Model: {config.translation.model}")
-        print(f"   Mode: {config.ui.default_mode}")
-        if args.dry_run:
-            print("   Dry run: enabled (API key validation skipped)")
+    out.verbose(f"Video ID: {video_id}")
