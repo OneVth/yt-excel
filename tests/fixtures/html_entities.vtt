@@ -1,0 +1,16 @@
+WEBVTT
+
+00:00:01.000 --> 00:00:04.500
+This is an example of &amp; usage.
+
+00:00:05.000 --> 00:00:08.200
+Less than &lt; and greater than &gt; signs.
+
+00:00:09.000 --> 00:00:12.800
+She said &quot;hello&quot; and it&#39;s fine.
+
+00:00:13.500 --> 00:00:17.000
+<b>Bold text</b> and <i>italic text</i> here.
+
+00:00:18.000 --> 00:00:21.500
+<font color="red">Colored</font> and <u>underlined</u> text.
