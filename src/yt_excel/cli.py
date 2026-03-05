@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 import openpyxl
 from rich.console import Console
+from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 
 from yt_excel import __version__
 from yt_excel.config import AppConfig, load_config
@@ -25,7 +26,13 @@ from yt_excel.excel import (
     write_metadata_row,
     write_study_log_row,
 )
-from yt_excel.translator import TranslationResult, create_client, translate_segments
+from yt_excel.translator import (
+    TranslationResult,
+    build_batches,
+    create_client,
+    translate_batch_with_retry,
+    translate_segments,
+)
 from yt_excel.vtt import (
     Segment,
     filter_short_segments,
@@ -347,8 +354,11 @@ def _run_pipeline(
     out.step("\U0001f310", f"Translating ({config.translation.model})...")
 
     client = create_client(api_key)
-    translation_result = translate_segments(client, final_segments, config.translation)
+    translation_result = _translate_with_progress(
+        client, final_segments, config, out,
+    )
 
+    out.blank()
     out.success(
         f"Translation complete ({translation_result.success_count} success, "
         f"{translation_result.failed_count} failed)",
@@ -412,13 +422,116 @@ def _run_pipeline(
 
     # --- Summary ---
     elapsed = time.monotonic() - pipeline_start
+    cost = _estimate_cost(len(final_segments), config.translation.model)
     out.step("\U0001f4ca", "Summary")
     out.detail(f"Segments: {len(final_segments)} / {len(raw_segments)} original")
     out.detail(
         f"Translation: {translation_result.success_count} \u2705  "
         f"{translation_result.failed_count} \u274c"
     )
+    out.detail(f"Cost: ~${cost:.4f}")
     out.detail(f"Time: {elapsed:.1f}s")
+
+
+def _translate_with_progress(
+    client: "OpenAI",  # type: ignore[name-defined]
+    segments: list[Segment],
+    config: AppConfig,
+    out: Output,
+) -> TranslationResult:
+    """Run translation with a rich progress bar (segment-level tracking).
+
+    In quiet mode, falls back to the standard translate_segments (no progress bar).
+
+    Args:
+        client: OpenAI client instance.
+        segments: Segments to translate.
+        config: Application configuration.
+        out: Output utility.
+
+    Returns:
+        TranslationResult with translated segments.
+    """
+    if out.mode == "quiet":
+        return translate_segments(client, segments, config.translation)
+
+    batches = build_batches(
+        segments,
+        batch_size=config.translation.batch_size,
+        context_before=config.translation.context_before,
+        context_after=config.translation.context_after,
+    )
+
+    translated_segments: list[Segment] = []
+    success_count = 0
+    failed_count = 0
+
+    with Progress(
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.percentage:>3.0f}%"),
+        TextColumn("({task.completed}/{task.total})"),
+        TimeRemainingColumn(),
+        console=_console,
+    ) as progress:
+        task = progress.add_task("Translating", total=len(segments))
+
+        for batch in batches:
+            translations = translate_batch_with_retry(
+                client=client,
+                batch=batch,
+                model=config.translation.model,
+                max_retries=config.translation.max_retries,
+                request_interval_ms=config.translation.request_interval_ms,
+            )
+
+            for seg, korean in zip(batch.translate_segments, translations):
+                translated_segments.append(Segment(
+                    index=seg.index,
+                    start=seg.start,
+                    end=seg.end,
+                    english=seg.english,
+                    korean=korean,
+                ))
+                if korean:
+                    success_count += 1
+                else:
+                    failed_count += 1
+
+            progress.update(task, advance=len(batch.translate_segments))
+
+    return TranslationResult(
+        segments=translated_segments,
+        success_count=success_count,
+        failed_count=failed_count,
+    )
+
+
+def _estimate_cost(segment_count: int, model: str) -> float:
+    """Estimate translation cost based on segment count and model.
+
+    Uses approximate token counts from design doc 7.3.
+
+    Args:
+        segment_count: Number of segments translated.
+        model: Model name.
+
+    Returns:
+        Estimated cost in USD.
+    """
+    avg_input_tokens_per_seg = 33  # ~20 English tokens + overhead
+    avg_output_tokens_per_seg = 20
+
+    total_input = segment_count * avg_input_tokens_per_seg
+    total_output = segment_count * avg_output_tokens_per_seg
+
+    pricing = {
+        "gpt-5-nano": {"input": 0.05, "output": 0.40},
+        "gpt-5-mini": {"input": 0.25, "output": 2.00},
+    }
+    rates = pricing.get(model, pricing["gpt-5-nano"])
+
+    return (total_input * rates["input"] + total_output * rates["output"]) / 1_000_000
 
 
 def _save_workbook_with_retry(
