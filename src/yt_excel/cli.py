@@ -362,9 +362,13 @@ def _run_pipeline(
     out.step("\U0001f310", f"Translating ({config.translation.model})...")
 
     client = create_client(api_key)
-    translation_result = _translate_with_progress(
-        client, final_segments, config, out,
-    )
+    try:
+        translation_result = _translate_with_progress(
+            client, final_segments, config, out,
+        )
+    except Exception as e:
+        out.error(f"Translation failed: {e}")
+        sys.exit(1)
 
     out.blank()
     out.success(
