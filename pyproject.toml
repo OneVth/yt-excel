@@ -1,0 +1,29 @@
+[project]
+name = "yt-excel"
+version = "0.1.0"
+description = "YouTube 영어 자막 -> 한국어 번역 -> Master Excel CLI Tool"
+readme = "README.md"
+authors = [
+    { name = "OneVth", email = "onebrotravel@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "openai>=2.24.0",
+    "openpyxl>=3.1.5",
+    "pyyaml>=6.0.3",
+    "rich>=14.3.3",
+    "yt-dlp>=2026.3.3",
+]
+
+[project.scripts]
+yt-excel = "yt_excel.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.16,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "ruff>=0.15.4",
+]
