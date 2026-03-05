@@ -21,10 +21,11 @@ class TestValidateApiKey:
         """Missing OPENAI_API_KEY raises SystemExit."""
         env = os.environ.copy()
         env.pop("OPENAI_API_KEY", None)
-        with patch.dict(os.environ, env, clear=True):
-            with pytest.raises(SystemExit) as exc_info:
-                validate_api_key()
-            assert "OPENAI_API_KEY is not set" in str(exc_info.value)
+        with patch("yt_excel.environment.load_dotenv"):
+            with patch.dict(os.environ, env, clear=True):
+                with pytest.raises(SystemExit) as exc_info:
+                    validate_api_key()
+                assert "OPENAI_API_KEY is not set" in str(exc_info.value)
 
     def test_empty_key_exits(self):
         """Empty string API key raises SystemExit."""
