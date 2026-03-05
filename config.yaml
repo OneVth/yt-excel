@@ -1,0 +1,26 @@
+# 번역 설정
+translation:
+  model: "gpt-5-nano"          # gpt-5-nano 또는 gpt-5-mini
+  batch_size: 10                # 배치당 세그먼트 수
+  context_before: 3             # 앞쪽 컨텍스트 세그먼트 수
+  context_after: 3              # 뒤쪽 컨텍스트 세그먼트 수
+  request_interval_ms: 200      # API 요청 간 최소 대기 (ms)
+  max_retries: 3                # 배치별 최대 재시도
+
+# 필터링 설정
+filter:
+  min_duration_sec: 0.5         # 최소 세그먼트 길이 (초)
+  min_text_length: 2            # 최소 텍스트 길이 (문자)
+
+# 파일 설정
+file:
+  master_path: "./Master.xlsx"  # Master Excel 기본 경로
+
+# 스타일 설정
+style:
+  font: "auto"                  # auto = Noto Sans KR → Malgun Gothic fallback
+                                # 또는 직접 폰트명 지정 (예: "Arial")
+
+# UX 설정
+ui:
+  default_mode: "normal"        # normal / verbose / quiet
