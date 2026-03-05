@@ -116,3 +116,76 @@ def parse_vtt(content: str) -> list[Segment]:
         ))
 
     return segments
+
+
+# --- Markup Stripping ---
+
+# Matches any HTML/WebVTT tag (opening, closing, self-closing)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+# VTT cue setting keywords that appear on text lines (not timestamp lines)
+_CUE_SETTING_RE = re.compile(
+    r"(?:align|position|size|line|vertical|region):[^\s]+"
+)
+
+
+def strip_markup(text: str) -> str:
+    """Remove HTML/WebVTT markup and decode HTML entities.
+
+    Processing order (per design doc 6.2):
+    1. Remove VTT cue setting directives (align:start, position:10%, etc.)
+    2. Remove all HTML/WebVTT tags (<c>, <v>, <b>, <i>, <font>, etc.)
+    3. Decode HTML entities (&amp; -> &, &#39; -> ', etc.)
+    4. Collapse consecutive whitespace to single space
+    5. Trim leading/trailing whitespace
+
+    Tags are removed but their inner text is preserved:
+    - <c.colorE5E5E5>word</c> -> word
+    - <v Speaker>Hello</v> -> Hello
+    - <b>Bold</b> -> Bold
+
+    Args:
+        text: VTT cue text potentially containing markup.
+
+    Returns:
+        Clean text with all markup removed and entities decoded.
+    """
+    # 1. Remove VTT cue settings
+    result = _CUE_SETTING_RE.sub("", text)
+
+    # 2. Remove all HTML/WebVTT tags
+    result = _TAG_RE.sub("", result)
+
+    # 3. Decode HTML entities
+    result = html.unescape(result)
+
+    # 4. Collapse consecutive whitespace
+    result = re.sub(r"\s+", " ", result)
+
+    # 5. Trim
+    return result.strip()
+
+
+def strip_markup_segments(segments: list[Segment]) -> list[Segment]:
+    """Apply markup stripping to all segments, removing empty ones.
+
+    Args:
+        segments: List of Segment objects with raw VTT text.
+
+    Returns:
+        New list with markup stripped. Segments that become empty after
+        stripping are excluded.
+    """
+    result: list[Segment] = []
+    index = 1
+    for seg in segments:
+        cleaned = strip_markup(seg.english)
+        if cleaned:
+            result.append(Segment(
+                index=index,
+                start=seg.start,
+                end=seg.end,
+                english=cleaned,
+            ))
+            index += 1
+    return result

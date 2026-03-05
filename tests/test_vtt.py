@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from yt_excel.vtt import Segment, parse_vtt
+from yt_excel.vtt import Segment, parse_vtt, strip_markup, strip_markup_segments
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -110,3 +110,156 @@ class TestParseVttRawTags:
         content = _read_fixture("speaker_tags.vtt")
         segments = parse_vtt(content)
         assert "<v Speaker 1>" in segments[0].english
+
+
+# --- strip_markup tests ---
+
+
+class TestStripMarkupCTags:
+    """Test <c> word-level timing tag removal."""
+
+    def test_c_tag_with_class_removed(self) -> None:
+        assert strip_markup("<c.colorE5E5E5>Hello</c>") == "Hello"
+
+    def test_c_tag_plain_removed(self) -> None:
+        assert strip_markup("<c>word</c>") == "word"
+
+    def test_multiple_c_tags(self) -> None:
+        result = strip_markup("<c>Hello</c> and <c>world</c>")
+        assert result == "Hello and world"
+
+    def test_word_timing_fixture(self) -> None:
+        content = _read_fixture("word_timing.vtt")
+        segments = parse_vtt(content)
+        cleaned = strip_markup(segments[0].english)
+        assert cleaned == "Hello and welcome to this video."
+        assert "<c" not in cleaned
+
+
+class TestStripMarkupVTags:
+    """Test <v> speaker tag removal."""
+
+    def test_v_tag_removes_speaker_name(self) -> None:
+        assert strip_markup("<v Speaker 1>Hello</v>") == "Hello"
+
+    def test_v_tag_with_title(self) -> None:
+        assert strip_markup("<v Dr. Smith>Good morning</v>") == "Good morning"
+
+    def test_speaker_tags_fixture(self) -> None:
+        content = _read_fixture("speaker_tags.vtt")
+        segments = parse_vtt(content)
+        cleaned = strip_markup(segments[1].english)
+        assert cleaned == "Today we're going to learn about DNA."
+
+
+class TestStripMarkupHTMLTags:
+    """Test HTML inline tag removal."""
+
+    def test_bold_tag_removed(self) -> None:
+        assert strip_markup("<b>Bold text</b>") == "Bold text"
+
+    def test_italic_tag_removed(self) -> None:
+        assert strip_markup("<i>Italic text</i>") == "Italic text"
+
+    def test_underline_tag_removed(self) -> None:
+        assert strip_markup("<u>Underlined</u>") == "Underlined"
+
+    def test_font_tag_with_attrs_removed(self) -> None:
+        assert strip_markup('<font color="red">Colored</font>') == "Colored"
+
+    def test_nested_tags(self) -> None:
+        assert strip_markup("<b><i>Bold italic</i></b>") == "Bold italic"
+
+
+class TestStripMarkupEntities:
+    """Test HTML entity decoding."""
+
+    def test_amp_decoded(self) -> None:
+        assert strip_markup("Tom &amp; Jerry") == "Tom & Jerry"
+
+    def test_lt_gt_decoded(self) -> None:
+        assert strip_markup("&lt;hello&gt;") == "<hello>"
+
+    def test_quot_decoded(self) -> None:
+        assert strip_markup("&quot;hello&quot;") == '"hello"'
+
+    def test_numeric_entity_decoded(self) -> None:
+        assert strip_markup("it&#39;s") == "it's"
+
+    def test_entities_fixture(self) -> None:
+        content = _read_fixture("html_entities.vtt")
+        segments = parse_vtt(content)
+        cleaned = strip_markup(segments[0].english)
+        assert cleaned == "This is an example of & usage."
+
+    def test_entities_with_tags(self) -> None:
+        content = _read_fixture("html_entities.vtt")
+        segments = parse_vtt(content)
+        cleaned = strip_markup(segments[3].english)
+        assert cleaned == "Bold text and italic text here."
+
+
+class TestStripMarkupWebVTTSpecific:
+    """Test WebVTT-specific tag and directive removal."""
+
+    def test_lang_tag_removed(self) -> None:
+        assert strip_markup("<lang en>Hello</lang>") == "Hello"
+
+    def test_ruby_rt_tags_removed(self) -> None:
+        result = strip_markup("<ruby>DNA<rt>acid</rt></ruby>")
+        assert result == "DNAacid"
+
+    def test_cue_settings_in_text_removed(self) -> None:
+        result = strip_markup("align:start Hello world")
+        assert result == "Hello world"
+
+    def test_position_in_text_removed(self) -> None:
+        result = strip_markup("position:10% Some text size:80%")
+        assert result == "Some text"
+
+
+class TestStripMarkupWhitespace:
+    """Test whitespace handling after stripping."""
+
+    def test_consecutive_spaces_collapsed(self) -> None:
+        assert strip_markup("Hello   world") == "Hello world"
+
+    def test_leading_trailing_stripped(self) -> None:
+        assert strip_markup("  Hello world  ") == "Hello world"
+
+    def test_tag_removal_spaces_collapsed(self) -> None:
+        result = strip_markup("<c>Hello</c>  <c>world</c>")
+        assert result == "Hello world"
+
+
+class TestStripMarkupSegments:
+    """Test strip_markup_segments on segment lists."""
+
+    def test_strips_all_segments(self) -> None:
+        segments = [
+            Segment(1, "00:00:01.000", "00:00:02.000", "<b>Hello</b>"),
+            Segment(2, "00:00:03.000", "00:00:04.000", "<i>World</i>"),
+        ]
+        result = strip_markup_segments(segments)
+        assert len(result) == 2
+        assert result[0].english == "Hello"
+        assert result[1].english == "World"
+
+    def test_removes_empty_after_strip(self) -> None:
+        segments = [
+            Segment(1, "00:00:01.000", "00:00:02.000", "<b></b>"),
+            Segment(2, "00:00:03.000", "00:00:04.000", "Hello"),
+        ]
+        result = strip_markup_segments(segments)
+        assert len(result) == 1
+        assert result[0].english == "Hello"
+        assert result[0].index == 1  # reindexed
+
+    def test_preserves_timestamps(self) -> None:
+        segments = [
+            Segment(1, "00:00:01.000", "00:00:04.500", "<c>Hello</c> &amp; world"),
+        ]
+        result = strip_markup_segments(segments)
+        assert result[0].start == "00:00:01.000"
+        assert result[0].end == "00:00:04.500"
+        assert result[0].english == "Hello & world"
