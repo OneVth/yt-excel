@@ -285,3 +285,67 @@ def list_captions(video_id: str) -> CaptionInfo:
     auto_subs: dict = info.get("automatic_captions") or {}
 
     return _classify_captions(manual_subs, auto_subs)
+
+
+@with_retry(max_retries=3, retryable=_RETRYABLE_ERRORS)
+def download_captions(video_id: str, lang_code: str) -> str:
+    """Download manual English captions in VTT format.
+
+    Uses yt-dlp to download only manual subtitles (never auto-generated).
+    Returns the raw VTT content as a string.
+
+    Args:
+        video_id: 11-character YouTube video ID.
+        lang_code: Language code for the caption track (e.g. "en", "en-US").
+
+    Returns:
+        Raw VTT subtitle content as a string.
+
+    Raises:
+        RetryExhaustedError: If all retry attempts fail.
+        CaptionNotFoundError: If the requested caption track is not available.
+    """
+    url = f"https://www.youtube.com/watch?v={video_id}"
+
+    # Use yt-dlp to get subtitle URL, then fetch content
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "writesubtitles": True,
+        "writeautomaticsub": False,  # Never download auto-generated
+        "subtitleslangs": [lang_code],
+        "subtitlesformat": "vtt",
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    if info is None:
+        raise yt_dlp.utils.DownloadError(f"Failed to fetch info for {video_id}")
+
+    # Get the subtitle data from the info dict
+    subs = info.get("requested_subtitles") or {}
+    sub_info = subs.get(lang_code)
+
+    if sub_info is None:
+        raise CaptionNotFoundError(
+            f"Caption track '{lang_code}' not found in requested subtitles."
+        )
+
+    # If yt-dlp provides the subtitle URL, download it
+    sub_url = sub_info.get("url")
+    if sub_url:
+        with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
+            # Use yt-dlp's url opener to handle cookies/headers
+            response = ydl.urlopen(sub_url)
+            return response.read().decode("utf-8")
+
+    # If yt-dlp already provides the data inline
+    sub_data = sub_info.get("data")
+    if sub_data:
+        return sub_data
+
+    raise CaptionNotFoundError(
+        f"No downloadable content for caption track '{lang_code}'."
+    )
