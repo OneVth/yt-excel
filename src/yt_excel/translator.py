@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 
 from openai import OpenAI
 
@@ -72,6 +73,78 @@ def build_user_message(
             lines.append(f"[CONTEXT] {seg.index}: {seg.english}")
 
     return "\n".join(lines)
+
+
+@dataclass
+class Batch:
+    """A single translation batch with context windows.
+
+    Attributes:
+        translate_segments: Segments to translate in this batch.
+        context_before: Preceding context segments (for reference only).
+        context_after: Following context segments (for reference only).
+    """
+
+    translate_segments: list[Segment]
+    context_before: list[Segment]
+    context_after: list[Segment]
+
+
+def build_batches(
+    segments: list[Segment],
+    batch_size: int = 10,
+    context_before: int = 3,
+    context_after: int = 3,
+) -> list[Batch]:
+    """Split segments into sliding window batches for translation.
+
+    Each batch contains up to batch_size segments to translate, plus
+    context_before preceding segments and context_after following segments
+    for reference. Context windows are automatically adjusted at the
+    start and end of the segment list.
+
+    If total segments <= batch_size, a single batch with no context is created.
+
+    Args:
+        segments: All segments to translate.
+        batch_size: Number of segments per translation batch.
+        context_before: Number of preceding context segments.
+        context_after: Number of following context segments.
+
+    Returns:
+        List of Batch objects ready for API calls.
+    """
+    if not segments:
+        return []
+
+    total = len(segments)
+
+    # Single batch: no context needed
+    if total <= batch_size:
+        return [Batch(
+            translate_segments=list(segments),
+            context_before=[],
+            context_after=[],
+        )]
+
+    batches: list[Batch] = []
+    for start in range(0, total, batch_size):
+        end = min(start + batch_size, total)
+        translate = segments[start:end]
+
+        ctx_before_start = max(0, start - context_before)
+        ctx_before = segments[ctx_before_start:start]
+
+        ctx_after_end = min(total, end + context_after)
+        ctx_after = segments[end:ctx_after_end]
+
+        batches.append(Batch(
+            translate_segments=translate,
+            context_before=ctx_before,
+            context_after=ctx_after,
+        ))
+
+    return batches
 
 
 def create_client(api_key: str) -> OpenAI:
