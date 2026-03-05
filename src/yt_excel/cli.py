@@ -340,12 +340,20 @@ def _run_pipeline(
 
     # --- Step 8: Dry-run exits here (translation + Excel skipped) ---
     if args.dry_run:
+        cost = _estimate_cost(len(final_segments), config.translation.model)
+        num_batches = (
+            (len(final_segments) + config.translation.batch_size - 1)
+            // config.translation.batch_size
+        )
         out.step("\U0001f4ca", "Dry Run Analysis")
         out.detail(f"Video: {meta.title} ({meta.duration})")
         out.detail(
             f"Segments: {len(final_segments)} / {len(raw_segments)} original "
             f"({filtered_count} filtered)"
         )
+        out.detail(f"Batches: {num_batches} (batch_size={config.translation.batch_size})")
+        out.detail(f"Model: {config.translation.model}")
+        out.detail(f"Estimated cost: ~${cost:.4f}")
         out.blank()
         out.info("Dry run complete \u2014 no translation or Excel write performed.")
         return
