@@ -5,11 +5,15 @@ import pytest
 
 from yt_excel.excel import (
     DATA_HEADERS,
+    DuplicateVideoError,
+    FileLockError,
     METADATA_HEADERS,
     METADATA_SHEET,
     STUDY_LOG_HEADERS,
     STUDY_LOG_SHEET,
     InitResult,
+    check_duplicate,
+    check_file_lock,
     initialize_workbook,
 )
 
@@ -134,3 +138,95 @@ class TestInitializeWorkbook:
         assert STUDY_LOG_SHEET in wb.sheetnames
         # Original data sheet still there
         assert "Some Data Sheet" in wb.sheetnames
+
+
+class TestCheckFileLock:
+    """Tests for check_file_lock — best-effort write permission check."""
+
+    def test_writable_file_passes(self, tmp_path):
+        """Normal writable file does not raise."""
+        path = tmp_path / "Master.xlsx"
+        initialize_workbook(path)
+        # Should not raise
+        check_file_lock(path)
+
+    def test_nonexistent_file_passes(self, tmp_path):
+        """Non-existent file does not raise (nothing to lock)."""
+        path = tmp_path / "Master.xlsx"
+        check_file_lock(path)
+
+    def test_locked_file_raises(self, tmp_path, monkeypatch):
+        """PermissionError when opening file raises FileLockError."""
+        path = tmp_path / "Master.xlsx"
+        initialize_workbook(path)
+
+        # Mock builtins.open to raise PermissionError (simulates Excel lock)
+        import builtins
+        real_open = builtins.open
+
+        def mock_open(p, *args, **kwargs):
+            if str(p) == str(path) and "r+b" in args:
+                raise PermissionError("File is locked")
+            return real_open(p, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", mock_open)
+
+        with pytest.raises(FileLockError, match="locked or read-only"):
+            check_file_lock(path)
+
+
+class TestCheckDuplicate:
+    """Tests for check_duplicate — video_id lookup in _metadata."""
+
+    def test_new_video_passes(self, tmp_path):
+        """New video_id does not raise."""
+        path = tmp_path / "Master.xlsx"
+        initialize_workbook(path)
+        # Should not raise
+        check_duplicate(path, "abcde123456")
+
+    def test_nonexistent_file_passes(self, tmp_path):
+        """Non-existent file does not raise."""
+        path = tmp_path / "Master.xlsx"
+        check_duplicate(path, "abcde123456")
+
+    def test_duplicate_video_raises(self, tmp_path):
+        """Existing video_id raises DuplicateVideoError with details."""
+        path = tmp_path / "Master.xlsx"
+        initialize_workbook(path)
+
+        # Add a row to _metadata
+        wb = openpyxl.load_workbook(str(path))
+        ws = wb[METADATA_SHEET]
+        ws.cell(row=2, column=1, value="dQw4w9WgXcQ")
+        ws.cell(row=2, column=6, value="How DNA Works")
+        ws.cell(row=2, column=7, value="2026-03-01T12:00:00")
+        wb.save(str(path))
+
+        with pytest.raises(DuplicateVideoError) as exc_info:
+            check_duplicate(path, "dQw4w9WgXcQ")
+
+        assert exc_info.value.video_id == "dQw4w9WgXcQ"
+        assert exc_info.value.sheet_name == "How DNA Works"
+        assert exc_info.value.processed_at == "2026-03-01T12:00:00"
+
+    def test_different_video_passes(self, tmp_path):
+        """Different video_id does not raise when other videos exist."""
+        path = tmp_path / "Master.xlsx"
+        initialize_workbook(path)
+
+        wb = openpyxl.load_workbook(str(path))
+        ws = wb[METADATA_SHEET]
+        ws.cell(row=2, column=1, value="existingID01")
+        wb.save(str(path))
+
+        # Different ID should pass
+        check_duplicate(path, "newVideoID01")
+
+    def test_missing_metadata_sheet_passes(self, tmp_path):
+        """File without _metadata sheet does not raise."""
+        path = tmp_path / "Master.xlsx"
+        wb = openpyxl.Workbook()
+        wb.save(str(path))
+
+        check_duplicate(path, "anyVideoID01")

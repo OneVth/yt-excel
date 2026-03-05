@@ -8,6 +8,24 @@ from openpyxl import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
 
+class FileLockError(Exception):
+    """Master.xlsx is locked or read-only."""
+
+
+class DuplicateVideoError(Exception):
+    """Video has already been processed."""
+
+    def __init__(self, video_id: str, sheet_name: str, processed_at: str) -> None:
+        self.video_id = video_id
+        self.sheet_name = sheet_name
+        self.processed_at = processed_at
+        super().__init__(
+            f"This video has already been processed.\n"
+            f"Sheet: {sheet_name}\n"
+            f"Processed at: {processed_at}"
+        )
+
+
 # --- Sheet Names ---
 METADATA_SHEET = "_metadata"
 STUDY_LOG_SHEET = "_study_log"
@@ -125,3 +143,70 @@ def initialize_workbook(master_path: str | Path) -> InitResult:
         wb.save(str(path))
 
     return result
+
+
+def check_file_lock(master_path: str | Path) -> None:
+    """Verify that Master.xlsx is writable (best-effort lock check).
+
+    Attempts to open the file in append mode to detect if another process
+    (e.g. Excel) holds a lock. This is best-effort — a lock acquired after
+    this check cannot be prevented.
+
+    Args:
+        master_path: Path to the Master.xlsx file.
+
+    Raises:
+        FileLockError: If the file cannot be opened for writing.
+    """
+    path = Path(master_path)
+    if not path.exists():
+        return
+
+    try:
+        with open(path, "r+b"):
+            pass
+    except PermissionError:
+        raise FileLockError(
+            f"Master.xlsx is locked or read-only.\n"
+            f"Please close the file in Excel and retry."
+        )
+
+
+def check_duplicate(master_path: str | Path, video_id: str) -> None:
+    """Check if a video has already been processed in _metadata.
+
+    Scans the video_id column (column 1) of the _metadata sheet.
+
+    Args:
+        master_path: Path to the Master.xlsx file.
+        video_id: YouTube video ID to check.
+
+    Raises:
+        DuplicateVideoError: If the video_id already exists in _metadata.
+    """
+    path = Path(master_path)
+    if not path.exists():
+        return
+
+    wb = openpyxl.load_workbook(str(path), read_only=True)
+
+    if METADATA_SHEET not in wb.sheetnames:
+        wb.close()
+        return
+
+    ws = wb[METADATA_SHEET]
+    # Find video_id and corresponding sheet_name and processed_at columns
+    # Headers are in row 1; video_id=col1, sheet_name=col6, processed_at=col7
+    for row in ws.iter_rows(min_row=2, values_only=False):
+        cell_video_id = row[0].value
+        if cell_video_id == video_id:
+            sheet_name = row[5].value if len(row) > 5 else ""
+            processed_at = row[6].value if len(row) > 6 else ""
+            wb.close()
+            raise DuplicateVideoError(
+                video_id=video_id,
+                sheet_name=str(sheet_name or ""),
+                processed_at=str(processed_at or ""),
+            )
+
+    wb.close()
