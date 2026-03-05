@@ -7,7 +7,7 @@
 ## 전제 조건
 
 - **런타임**: Python 3.12+ / uv 패키지 매니저
-- **핵심 의존성**: `yt-dlp`, `openpyxl`, `openai`, `rich`, `pyyaml`
+- **핵심 의존성**: `yt-dlp`, `openpyxl`, `openai`, `rich`, `pyyaml`, `python-dotenv`
 - **설계 문서**: `docs/youtube_master_excel_cli_design_final.md`
 - **각 Phase 종료 조건**: 해당 Phase의 모든 체크리스트 항목이 완료되고, 수동 테스트를 통과해야 다음 Phase로 진행
 

@@ -91,20 +91,49 @@ Summary 출력
 
 ## 4.1 관리 방식
 
-환경 변수 `OPENAI_API_KEY`로 관리한다. config 파일에 API 키를 저장하지 않는다.
+환경 변수 `OPENAI_API_KEY`로 관리한다. config.yaml에 API 키를 저장하지 않는다.
+
+프로젝트 루트의 `.env` 파일을 지원하여 매 세션마다 환경 변수를 설정하는 번거로움을 줄인다.
+`python-dotenv` 패키지를 사용하여 `.env` 파일에서 환경 변수를 로딩한다.
+
+### 로딩 우선순위
+
+```
+1. 시스템 환경 변수 (이미 설정되어 있으면 최우선)
+2. .env 파일 (시스템 환경 변수에 없을 때 fallback)
+3. 둘 다 없으면 → 에러 메시지 출력 후 종료
+```
+
+`python-dotenv`의 `override=False` 옵션을 사용하여 시스템 환경 변수가 .env보다 우선하도록 한다.
+
+### .env 파일 관리
+
+```
+# .env.example (커밋 대상 — 필요한 변수 안내용)
+OPENAI_API_KEY=your-api-key-here
+```
+
+```
+# .env (gitignore 대상 — 실제 키 보관)
+OPENAI_API_KEY=sk-실제키값
+```
+
+- `.env`는 `.gitignore`에 포함하여 절대 커밋하지 않는다
+- `.env.example`은 커밋하여 어떤 환경 변수가 필요한지 안내한다
 
 ## 4.2 검증 흐름
 
 ```
 CLI 시작
+→ .env 파일 로딩 (python-dotenv, override=False)
 → 환경 변수 OPENAI_API_KEY 존재 확인
 → 없음:
-    ❌ ERROR: OPENAI_API_KEY environment variable is not set.
+    ❌ ERROR: OPENAI_API_KEY is not set.
 
-    Set it with:
-      export OPENAI_API_KEY="sk-..."    (Linux/macOS)
-      set OPENAI_API_KEY=sk-...         (Windows CMD)
-      $env:OPENAI_API_KEY="sk-..."      (PowerShell)
+    Set it with one of:
+      1. Create a .env file:  echo OPENAI_API_KEY=sk-... > .env
+      2. Export directly:      export OPENAI_API_KEY="sk-..."  (Linux/macOS)
+                               $env:OPENAI_API_KEY="sk-..."    (PowerShell)
 
     Aborting.
 → 있음: 빈 문자열 확인
@@ -123,6 +152,7 @@ CLI 시작
 ## 4.4 보안 원칙
 
 - API 키는 config.yaml에 절대 저장하지 않는다
+- `.env` 파일은 `.gitignore`에 포함하여 절대 커밋하지 않는다
 - CLI 로그(verbose 모드 포함)에 API 키를 출력하지 않는다
 - 에러 메시지에 API 키 값을 포함하지 않는다
 
@@ -1056,7 +1086,7 @@ API 키는 config.yaml에 저장하지 않는다. 환경 변수 `OPENAI_API_KEY`
 - 폰트 auto-detect (Noto Sans KR → Malgun Gothic fallback)
 - 연한 회색 헤더 + Conditional Formatting으로 번역 실패/학습 미완료 시각화
 - Master.xlsx 미존재 시 자동 생성, 시트 누락 시 기존 데이터 보존하며 복구
-- API 키는 환경 변수로만 관리, config.yaml 및 로그에 노출 금지
+- API 키는 환경 변수로 관리 (.env 파일 지원, 시스템 환경 변수 우선), config.yaml 및 로그에 노출 금지
 - 영어 자막 언어 코드는 en 정확 일치 우선, en-* 변종도 수용
 - Master.xlsx 파일 잠금 사전 검증으로 API 비용 낭비 방지 (best-effort)
 - 번역 응답은 JSON 모드 강제 + 마크다운 블록 fallback strip
