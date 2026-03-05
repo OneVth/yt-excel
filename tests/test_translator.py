@@ -5,13 +5,18 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from yt_excel.config import TranslationConfig
 from yt_excel.translator import (
     Batch,
+    TranslationResult,
     build_batches,
     build_system_prompt,
     build_user_message,
     call_translation_api,
     parse_translation_response,
+    translate_batch_with_retry,
+    translate_segments,
+    validate_translations,
 )
 from yt_excel.vtt import Segment
 
@@ -297,3 +302,195 @@ class TestCallTranslationApi:
         )
         result = call_translation_api(mock_client, batch, model="gpt-5-nano")
         assert result == ""
+
+
+class TestValidateTranslations:
+    """Tests for translation array length validation."""
+
+    def test_exact_match(self) -> None:
+        result = validate_translations(["a", "b", "c"], expected_count=3)
+        assert result == ["a", "b", "c"]
+
+    def test_excess_truncated_with_warning(self) -> None:
+        result = validate_translations(["a", "b", "c", "d", "e"], expected_count=3)
+        assert result == ["a", "b", "c"]
+
+    def test_shortage_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="expected 3"):
+            validate_translations(["a"], expected_count=3)
+
+    def test_empty_list_when_expected_zero(self) -> None:
+        result = validate_translations([], expected_count=0)
+        assert result == []
+
+
+class TestTranslateBatchWithRetry:
+    """Tests for batch retry logic with mocked API."""
+
+    def _mock_api_response(self, translations: list[str]) -> MagicMock:
+        """Create a mock client that returns given translations."""
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = json.dumps(
+            {"translations": translations}
+        )
+        mock_client.chat.completions.create.return_value = mock_response
+        return mock_client
+
+    @patch("yt_excel.translator.time.sleep")
+    def test_successful_translation(self, mock_sleep: MagicMock) -> None:
+        mock_client = self._mock_api_response(["안녕"])
+        batch = Batch(
+            translate_segments=[_make_segment(1, "Hello")],
+            context_before=[],
+            context_after=[],
+        )
+        result = translate_batch_with_retry(
+            mock_client, batch, "gpt-5-nano", max_retries=3, request_interval_ms=0,
+        )
+        assert result == ["안녕"]
+
+    @patch("yt_excel.translator.time.sleep")
+    def test_retry_on_shortage_then_success(self, mock_sleep: MagicMock) -> None:
+        mock_client = MagicMock()
+        # First call: too few translations; second call: correct
+        responses = [
+            self._make_response(["only_one"]),
+            self._make_response(["번역1", "번역2"]),
+        ]
+        mock_client.chat.completions.create.side_effect = responses
+
+        batch = Batch(
+            translate_segments=[_make_segment(1, "Hello"), _make_segment(2, "World")],
+            context_before=[],
+            context_after=[],
+        )
+        result = translate_batch_with_retry(
+            mock_client, batch, "gpt-5-nano", max_retries=3, request_interval_ms=0,
+        )
+        assert result == ["번역1", "번역2"]
+        assert mock_client.chat.completions.create.call_count == 2
+
+    @patch("yt_excel.translator.time.sleep")
+    def test_three_failures_returns_empty_strings(self, mock_sleep: MagicMock) -> None:
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = ValueError("parse error")
+
+        batch = Batch(
+            translate_segments=[_make_segment(1, "Hello"), _make_segment(2, "World")],
+            context_before=[],
+            context_after=[],
+        )
+        result = translate_batch_with_retry(
+            mock_client, batch, "gpt-5-nano", max_retries=3, request_interval_ms=0,
+        )
+        assert result == ["", ""]
+        assert mock_client.chat.completions.create.call_count == 3
+
+    @patch("yt_excel.translator.time.sleep")
+    def test_rate_limit_429_retry(self, mock_sleep: MagicMock) -> None:
+        from openai import RateLimitError
+
+        mock_client = MagicMock()
+        # Build a proper RateLimitError
+        mock_resp = MagicMock()
+        mock_resp.status_code = 429
+        mock_resp.headers = {"retry-after": "2"}
+        mock_resp.json.return_value = {"error": {"message": "rate limited"}}
+        rate_err = RateLimitError(
+            message="rate limited",
+            response=mock_resp,
+            body={"error": {"message": "rate limited"}},
+        )
+        good_response = self._make_response(["성공"])
+
+        mock_client.chat.completions.create.side_effect = [rate_err, good_response]
+
+        batch = Batch(
+            translate_segments=[_make_segment(1, "Hello")],
+            context_before=[],
+            context_after=[],
+        )
+        result = translate_batch_with_retry(
+            mock_client, batch, "gpt-5-nano", max_retries=3, request_interval_ms=0,
+        )
+        assert result == ["성공"]
+        assert mock_client.chat.completions.create.call_count == 2
+
+    @patch("yt_excel.translator.time.sleep")
+    def test_excess_translations_truncated(self, mock_sleep: MagicMock) -> None:
+        mock_client = self._mock_api_response(["a", "b", "c", "extra"])
+        batch = Batch(
+            translate_segments=[
+                _make_segment(1, "Hello"),
+                _make_segment(2, "World"),
+                _make_segment(3, "Foo"),
+            ],
+            context_before=[],
+            context_after=[],
+        )
+        result = translate_batch_with_retry(
+            mock_client, batch, "gpt-5-nano", max_retries=3, request_interval_ms=0,
+        )
+        assert result == ["a", "b", "c"]
+
+    def _make_response(self, translations: list[str]) -> MagicMock:
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = json.dumps(
+            {"translations": translations}
+        )
+        return mock_response
+
+
+class TestTranslateSegments:
+    """Tests for the full translation pipeline."""
+
+    @patch("yt_excel.translator.time.sleep")
+    def test_translates_all_segments(self, mock_sleep: MagicMock) -> None:
+        segments = _make_segments(3)
+        config = TranslationConfig(
+            model="gpt-5-nano",
+            batch_size=10,
+            context_before=3,
+            context_after=3,
+            request_interval_ms=0,
+            max_retries=3,
+        )
+
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = json.dumps(
+            {"translations": ["번역1", "번역2", "번역3"]}
+        )
+        mock_client.chat.completions.create.return_value = mock_response
+
+        result = translate_segments(mock_client, segments, config)
+        assert result.success_count == 3
+        assert result.failed_count == 0
+        assert len(result.segments) == 3
+        assert result.segments[0].korean == "번역1"
+        assert result.segments[2].korean == "번역3"
+
+    @patch("yt_excel.translator.time.sleep")
+    def test_failed_batch_leaves_korean_empty(self, mock_sleep: MagicMock) -> None:
+        segments = _make_segments(3)
+        config = TranslationConfig(
+            model="gpt-5-nano",
+            batch_size=10,
+            context_before=3,
+            context_after=3,
+            request_interval_ms=0,
+            max_retries=1,
+        )
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = ValueError("always fails")
+
+        result = translate_segments(mock_client, segments, config)
+        assert result.success_count == 0
+        assert result.failed_count == 3
+        for seg in result.segments:
+            assert seg.korean == ""

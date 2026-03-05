@@ -249,3 +249,208 @@ def call_translation_api(
     )
 
     return response.choices[0].message.content or ""
+
+
+def validate_translations(
+    translations: list[str],
+    expected_count: int,
+) -> list[str]:
+    """Validate and adjust the translation array length.
+
+    Rules (per design doc 7.6):
+    - Length match: use as-is
+    - Length > expected: truncate to first N, log warning
+    - Length < expected: raise ValueError to trigger retry
+
+    Args:
+        translations: Parsed translation strings.
+        expected_count: Expected number of translations.
+
+    Returns:
+        Validated list of exactly expected_count translations.
+
+    Raises:
+        ValueError: If array length is less than expected (triggers retry).
+    """
+    actual = len(translations)
+
+    if actual == expected_count:
+        return translations
+
+    if actual > expected_count:
+        logger.warning(
+            "Translation response has %d items, expected %d. "
+            "Using first %d and discarding %d extra.",
+            actual, expected_count, expected_count, actual - expected_count,
+        )
+        return translations[:expected_count]
+
+    # actual < expected_count: retry
+    raise ValueError(
+        f"Translation response has {actual} items, expected {expected_count}. "
+        f"Retrying batch."
+    )
+
+
+@dataclass
+class TranslationResult:
+    """Result of translating all segments.
+
+    Attributes:
+        segments: All segments with korean field populated where successful.
+        success_count: Number of successfully translated segments.
+        failed_count: Number of segments where translation failed.
+    """
+
+    segments: list[Segment]
+    success_count: int
+    failed_count: int
+
+
+def translate_batch_with_retry(
+    client: OpenAI,
+    batch: Batch,
+    model: str,
+    max_retries: int = 3,
+    request_interval_ms: int = 200,
+) -> list[str]:
+    """Translate a single batch with retry logic and rate limit handling.
+
+    Retries on:
+    - ValueError (array length mismatch, parse errors)
+    - openai.RateLimitError (429): respects Retry-After header
+    - Connection/timeout errors
+
+    After max_retries failures, returns empty strings for all segments.
+
+    Args:
+        client: OpenAI client instance.
+        batch: Batch to translate.
+        model: Model name.
+        max_retries: Maximum retry attempts per batch.
+        request_interval_ms: Minimum interval between requests in ms.
+
+    Returns:
+        List of Korean translations (empty strings on failure).
+    """
+    from openai import APIConnectionError, APITimeoutError, RateLimitError
+
+    expected_count = len(batch.translate_segments)
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            # Rate limiting: wait between requests
+            time.sleep(request_interval_ms / 1000.0)
+
+            raw_content = call_translation_api(client, batch, model)
+            translations = parse_translation_response(raw_content, expected_count)
+            validated = validate_translations(translations, expected_count)
+            return validated
+
+        except RateLimitError as exc:
+            last_error = exc
+            # Respect Retry-After header if available
+            retry_after = _extract_retry_after(exc)
+            wait_time = retry_after if retry_after > 0 else (1.0 * (2 ** (attempt - 1)))
+            logger.warning(
+                "Rate limited (429) on batch attempt %d/%d. Waiting %.1fs.",
+                attempt, max_retries, wait_time,
+            )
+            time.sleep(wait_time)
+
+        except (APIConnectionError, APITimeoutError) as exc:
+            last_error = exc
+            wait_time = 1.0 * (2 ** (attempt - 1))
+            logger.warning(
+                "Network error on batch attempt %d/%d: %s. Retrying in %.1fs.",
+                attempt, max_retries, type(exc).__name__, wait_time,
+            )
+            time.sleep(wait_time)
+
+        except ValueError as exc:
+            last_error = exc
+            wait_time = 1.0 * (2 ** (attempt - 1))
+            logger.warning(
+                "Validation error on batch attempt %d/%d: %s. Retrying in %.1fs.",
+                attempt, max_retries, exc, wait_time,
+            )
+            time.sleep(wait_time)
+
+    # All retries exhausted: return empty translations
+    logger.error(
+        "Batch translation failed after %d attempts. Last error: %s. "
+        "Leaving %d segments untranslated.",
+        max_retries, last_error, expected_count,
+    )
+    return [""] * expected_count
+
+
+def _extract_retry_after(exc: Exception) -> float:
+    """Extract Retry-After value from a RateLimitError response."""
+    try:
+        response = getattr(exc, "response", None)
+        if response is not None:
+            headers = getattr(response, "headers", {})
+            retry_after = headers.get("retry-after", "")
+            if retry_after:
+                return float(retry_after)
+    except (ValueError, AttributeError):
+        pass
+    return 0.0
+
+
+def translate_segments(
+    client: OpenAI,
+    segments: list[Segment],
+    config: TranslationConfig,
+) -> TranslationResult:
+    """Translate all segments using sliding window batching.
+
+    Args:
+        client: OpenAI client instance.
+        segments: All processed segments to translate.
+        config: Translation configuration.
+
+    Returns:
+        TranslationResult with translated segments and success/failure counts.
+    """
+    batches = build_batches(
+        segments,
+        batch_size=config.batch_size,
+        context_before=config.context_before,
+        context_after=config.context_after,
+    )
+
+    translated_segments: list[Segment] = []
+    success_count = 0
+    failed_count = 0
+
+    for batch in batches:
+        translations = translate_batch_with_retry(
+            client=client,
+            batch=batch,
+            model=config.model,
+            max_retries=config.max_retries,
+            request_interval_ms=config.request_interval_ms,
+        )
+
+        for seg, korean in zip(batch.translate_segments, translations):
+            translated_seg = Segment(
+                index=seg.index,
+                start=seg.start,
+                end=seg.end,
+                english=seg.english,
+                korean=korean,
+            )
+            translated_segments.append(translated_seg)
+            if korean:
+                success_count += 1
+            else:
+                failed_count += 1
+
+    return TranslationResult(
+        segments=translated_segments,
+        success_count=success_count,
+        failed_count=failed_count,
+    )
