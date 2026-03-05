@@ -6,17 +6,32 @@ import pytest
 from datetime import date
 
 from yt_excel.excel import (
+    COL_WIDTH_ENGLISH,
+    COL_WIDTH_INDEX,
+    COL_WIDTH_KOREAN,
+    COL_WIDTH_TIMESTAMP,
     DATA_HEADERS,
     DuplicateVideoError,
+    FAIL_ROW_BG,
     FileLockError,
+    HEADER_BG,
+    HEADER_FG,
     METADATA_HEADERS,
     METADATA_SHEET,
     MetadataRow,
+    NOT_STARTED_BG,
     STUDY_LOG_HEADERS,
     STUDY_LOG_SHEET,
+    TAB_COLOR_METADATA,
+    TAB_COLOR_STUDY_LOG,
     InitResult,
+    apply_all_styles,
+    apply_data_sheet_style,
+    apply_metadata_style,
+    apply_study_log_style,
     check_duplicate,
     check_file_lock,
+    detect_font,
     generate_unique_sheet_name,
     initialize_workbook,
     sanitize_sheet_name,
@@ -567,3 +582,145 @@ class TestWriteStudyLogRow:
         ws = wb[STUDY_LOG_SHEET]
         # 1 hour 30 minutes = 90 minutes
         assert ws.cell(row=2, column=4).value == "90:45"
+
+
+class TestDetectFont:
+    """Tests for detect_font — font auto-detection."""
+
+    def test_explicit_font_returned(self):
+        """Non-auto setting returns the specified font."""
+        assert detect_font("Arial") == "Arial"
+
+    def test_auto_returns_string(self):
+        """Auto mode returns a non-empty string."""
+        result = detect_font("auto")
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+
+class TestStyleEngine:
+    """Tests for style application — headers, formatting, freeze, tab colors."""
+
+    def _make_styled_workbook(self, tmp_path, segment_count=3):
+        """Helper: create workbook with data, metadata, study log, then apply styles."""
+        path = tmp_path / "Master.xlsx"
+        initialize_workbook(path)
+        wb = openpyxl.load_workbook(str(path))
+
+        segments = _make_segments(segment_count)
+        write_data_sheet(wb, "Test Sheet", segments)
+        write_metadata_row(wb, _make_metadata_row())
+        write_study_log_row(wb, "How DNA Works", "00:04:52", segment_count)
+
+        font_name = "Malgun Gothic"
+        apply_all_styles(wb, font_name, data_sheet_name="Test Sheet")
+        wb.save(str(path))
+
+        return openpyxl.load_workbook(str(path))
+
+    def test_data_sheet_header_bg_color(self, tmp_path):
+        """Data sheet header has correct background color."""
+        wb = self._make_styled_workbook(tmp_path)
+        ws = wb["Test Sheet"]
+        cell = ws.cell(row=1, column=1)
+        assert cell.fill.start_color.rgb == "00" + HEADER_BG
+
+    def test_data_sheet_header_font_bold(self, tmp_path):
+        """Data sheet header font is bold."""
+        wb = self._make_styled_workbook(tmp_path)
+        ws = wb["Test Sheet"]
+        cell = ws.cell(row=1, column=1)
+        assert cell.font.bold is True
+
+    def test_data_sheet_header_font_color(self, tmp_path):
+        """Data sheet header font has correct color."""
+        wb = self._make_styled_workbook(tmp_path)
+        ws = wb["Test Sheet"]
+        cell = ws.cell(row=1, column=1)
+        assert cell.font.color.rgb == "00" + HEADER_FG
+
+    def test_data_sheet_freeze_panes(self, tmp_path):
+        """Data sheet has freeze panes at A2."""
+        wb = self._make_styled_workbook(tmp_path)
+        ws = wb["Test Sheet"]
+        assert ws.freeze_panes == "A2"
+
+    def test_data_sheet_column_widths(self, tmp_path):
+        """Data sheet has correct column widths."""
+        wb = self._make_styled_workbook(tmp_path)
+        ws = wb["Test Sheet"]
+        assert ws.column_dimensions["A"].width == COL_WIDTH_INDEX
+        assert ws.column_dimensions["B"].width == COL_WIDTH_TIMESTAMP
+        assert ws.column_dimensions["C"].width == COL_WIDTH_TIMESTAMP
+        assert ws.column_dimensions["D"].width == COL_WIDTH_ENGLISH
+        assert ws.column_dimensions["E"].width == COL_WIDTH_KOREAN
+
+    def test_data_sheet_conditional_formatting_exists(self, tmp_path):
+        """Data sheet has conditional formatting for failed translations."""
+        wb = self._make_styled_workbook(tmp_path)
+        ws = wb["Test Sheet"]
+        assert len(ws.conditional_formatting) > 0
+
+    def test_metadata_freeze_panes(self, tmp_path):
+        """_metadata sheet has freeze panes at A2."""
+        wb = self._make_styled_workbook(tmp_path)
+        ws = wb[METADATA_SHEET]
+        assert ws.freeze_panes == "A2"
+
+    def test_metadata_auto_filter(self, tmp_path):
+        """_metadata sheet has auto filter enabled."""
+        wb = self._make_styled_workbook(tmp_path)
+        ws = wb[METADATA_SHEET]
+        assert ws.auto_filter.ref is not None
+
+    def test_metadata_tab_color(self, tmp_path):
+        """_metadata sheet tab color is grey."""
+        wb = self._make_styled_workbook(tmp_path)
+        ws = wb[METADATA_SHEET]
+        assert ws.sheet_properties.tabColor.rgb == "00" + TAB_COLOR_METADATA
+
+    def test_study_log_freeze_panes(self, tmp_path):
+        """_study_log sheet has freeze panes at A2."""
+        wb = self._make_styled_workbook(tmp_path)
+        ws = wb[STUDY_LOG_SHEET]
+        assert ws.freeze_panes == "A2"
+
+    def test_study_log_auto_filter(self, tmp_path):
+        """_study_log sheet has auto filter enabled."""
+        wb = self._make_styled_workbook(tmp_path)
+        ws = wb[STUDY_LOG_SHEET]
+        assert ws.auto_filter.ref is not None
+
+    def test_study_log_tab_color(self, tmp_path):
+        """_study_log sheet tab color is blue."""
+        wb = self._make_styled_workbook(tmp_path)
+        ws = wb[STUDY_LOG_SHEET]
+        assert ws.sheet_properties.tabColor.rgb == "00" + TAB_COLOR_STUDY_LOG
+
+    def test_study_log_conditional_formatting(self, tmp_path):
+        """_study_log sheet has conditional formatting for Not Started."""
+        wb = self._make_styled_workbook(tmp_path)
+        ws = wb[STUDY_LOG_SHEET]
+        assert len(ws.conditional_formatting) > 0
+
+    def test_data_body_wrap_text(self, tmp_path):
+        """Data cells have wrap text enabled."""
+        wb = self._make_styled_workbook(tmp_path)
+        ws = wb["Test Sheet"]
+        cell = ws.cell(row=2, column=4)  # English column
+        assert cell.alignment.wrap_text is True
+
+    def test_data_body_vertical_top(self, tmp_path):
+        """Data cells have vertical alignment set to top."""
+        wb = self._make_styled_workbook(tmp_path)
+        ws = wb["Test Sheet"]
+        cell = ws.cell(row=2, column=4)  # English column
+        assert cell.alignment.vertical == "top"
+
+    def test_metadata_header_style(self, tmp_path):
+        """_metadata header has correct background and bold font."""
+        wb = self._make_styled_workbook(tmp_path)
+        ws = wb[METADATA_SHEET]
+        cell = ws.cell(row=1, column=1)
+        assert cell.fill.start_color.rgb == "00" + HEADER_BG
+        assert cell.font.bold is True

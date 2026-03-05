@@ -7,6 +7,9 @@ from pathlib import Path
 
 import openpyxl
 from openpyxl import Workbook
+from openpyxl.formatting.rule import CellIsRule, FormulaRule
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 
@@ -63,6 +66,36 @@ STUDY_LOG_HEADERS = [
 
 # --- Data Sheet Column Headers ---
 DATA_HEADERS = ["Index", "Start", "End", "English", "Korean"]
+
+# --- Style Constants (from CLAUDE.md) ---
+
+# Colors
+HEADER_BG = "F2F2F2"
+HEADER_FG = "333333"
+BORDER_COLOR = "E0E0E0"
+HEADER_BORDER_COLOR = "BFBFBF"
+FAIL_ROW_BG = "FFF2F2"
+NOT_STARTED_BG = "FFF8E1"
+
+# Font sizes
+FONT_SIZE_HEADER = 11
+FONT_SIZE_BODY = 10
+
+# Column widths — data sheet
+COL_WIDTH_INDEX = 7
+COL_WIDTH_TIMESTAMP = 13
+COL_WIDTH_ENGLISH = 50
+COL_WIDTH_KOREAN = 45
+
+# Column widths — _metadata sheet
+_METADATA_COL_WIDTHS = [14, 35, 40, 20, 12, 30, 20, 10, 10, 10, 10, 15, 12]
+
+# Column widths — _study_log sheet
+_STUDY_LOG_COL_WIDTHS = [6, 14, 35, 10, 10, 14, 14, 40]
+
+# Tab colors
+TAB_COLOR_METADATA = "808080"
+TAB_COLOR_STUDY_LOG = "4472C4"
 
 
 @dataclass
@@ -467,3 +500,269 @@ def write_study_log_row(
     ws.cell(row=next_row, column=6, value="Not Started")
     ws.cell(row=next_row, column=7, value=0)
     # Column 8 (Notes) left empty
+
+
+# --- Font Detection ---
+
+
+def detect_font(font_setting: str = "auto") -> str:
+    """Detect the best available Korean font.
+
+    If font_setting is "auto", checks for Noto Sans KR first,
+    then falls back to Malgun Gothic (Windows default).
+    Otherwise, returns the specified font name directly.
+
+    Args:
+        font_setting: Font name or "auto" for auto-detection.
+
+    Returns:
+        Font family name to use in Excel.
+    """
+    if font_setting != "auto":
+        return font_setting
+
+    # Check for Noto Sans KR in Windows fonts directory
+    import os
+
+    fonts_dir = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+    try:
+        font_files = os.listdir(fonts_dir)
+        for f in font_files:
+            if f.lower().startswith("notosanskr"):
+                return "Noto Sans KR"
+    except OSError:
+        pass
+
+    return "Malgun Gothic"
+
+
+# --- Style Engine ---
+
+
+def _make_header_font(font_name: str) -> Font:
+    """Create header font style."""
+    return Font(name=font_name, size=FONT_SIZE_HEADER, bold=True, color=HEADER_FG)
+
+
+def _make_body_font(font_name: str) -> Font:
+    """Create body text font style."""
+    return Font(name=font_name, size=FONT_SIZE_BODY)
+
+
+def _make_header_fill() -> PatternFill:
+    """Create header background fill."""
+    return PatternFill(start_color=HEADER_BG, end_color=HEADER_BG, fill_type="solid")
+
+
+def _make_header_border() -> Border:
+    """Create header bottom border."""
+    return Border(bottom=Side(style="thin", color=HEADER_BORDER_COLOR))
+
+
+def _make_data_border() -> Border:
+    """Create data row horizontal border (bottom only)."""
+    return Border(bottom=Side(style="thin", color=BORDER_COLOR))
+
+
+def apply_header_style(ws: Worksheet, font_name: str, col_count: int) -> None:
+    """Apply header style to row 1 of a worksheet.
+
+    Args:
+        ws: Target worksheet.
+        font_name: Font family name.
+        col_count: Number of columns to style.
+    """
+    header_font = _make_header_font(font_name)
+    header_fill = _make_header_fill()
+    header_border = _make_header_border()
+
+    for col_idx in range(1, col_count + 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = header_border
+        cell.alignment = Alignment(horizontal="center", vertical="top")
+
+
+def apply_data_style(
+    ws: Worksheet,
+    font_name: str,
+    col_count: int,
+    row_count: int,
+) -> None:
+    """Apply data area style to a worksheet.
+
+    Args:
+        ws: Target worksheet.
+        font_name: Font family name.
+        col_count: Number of columns.
+        row_count: Total rows including header.
+    """
+    body_font = _make_body_font(font_name)
+    data_border = _make_data_border()
+    wrap_alignment = Alignment(wrap_text=True, vertical="top")
+    center_top = Alignment(horizontal="center", vertical="top")
+
+    for row_idx in range(2, row_count + 1):
+        for col_idx in range(1, col_count + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.font = body_font
+            cell.border = data_border
+            cell.alignment = wrap_alignment
+
+    # Override alignment for specific columns that should be centered
+    # (subclasses handle this per sheet type)
+
+
+def apply_data_sheet_style(
+    ws: Worksheet,
+    font_name: str,
+    segment_count: int,
+) -> None:
+    """Apply full styling to a data sheet (video segments).
+
+    Args:
+        ws: Data sheet worksheet.
+        font_name: Font family name.
+        segment_count: Number of data rows (segments).
+    """
+    total_rows = segment_count + 1  # +1 for header
+    col_count = len(DATA_HEADERS)
+
+    # Header style
+    apply_header_style(ws, font_name, col_count)
+
+    # Data area style
+    apply_data_style(ws, font_name, col_count, total_rows)
+
+    # Column-specific alignment
+    center_top = Alignment(horizontal="center", vertical="top")
+    for row_idx in range(2, total_rows + 1):
+        # Index, Start, End = centered
+        ws.cell(row=row_idx, column=1).alignment = center_top
+        ws.cell(row=row_idx, column=2).alignment = center_top
+        ws.cell(row=row_idx, column=3).alignment = center_top
+        # English, Korean = left, wrap (already set by apply_data_style)
+
+    # Column widths
+    ws.column_dimensions["A"].width = COL_WIDTH_INDEX
+    ws.column_dimensions["B"].width = COL_WIDTH_TIMESTAMP
+    ws.column_dimensions["C"].width = COL_WIDTH_TIMESTAMP
+    ws.column_dimensions["D"].width = COL_WIDTH_ENGLISH
+    ws.column_dimensions["E"].width = COL_WIDTH_KOREAN
+
+    # Freeze top row
+    ws.freeze_panes = "A2"
+
+    # Conditional formatting: highlight rows where Korean (col E) is empty
+    if segment_count > 0:
+        fail_fill = PatternFill(
+            start_color=FAIL_ROW_BG, end_color=FAIL_ROW_BG, fill_type="solid"
+        )
+        range_str = f"A2:E{total_rows}"
+        ws.conditional_formatting.add(
+            range_str,
+            FormulaRule(
+                formula=[f'$E2=""'],
+                fill=fail_fill,
+            ),
+        )
+
+
+def apply_metadata_style(ws: Worksheet, font_name: str) -> None:
+    """Apply styling to the _metadata sheet.
+
+    Args:
+        ws: _metadata worksheet.
+        font_name: Font family name.
+    """
+    col_count = len(METADATA_HEADERS)
+    total_rows = ws.max_row
+
+    apply_header_style(ws, font_name, col_count)
+
+    if total_rows > 1:
+        apply_data_style(ws, font_name, col_count, total_rows)
+
+    # Column widths
+    for col_idx, width in enumerate(_METADATA_COL_WIDTHS, start=1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    # Center alignment for specific columns
+    center_cols = {5, 7, 8, 9, 10, 11, 13}  # duration, processed_at, counts, version
+    center_top = Alignment(horizontal="center", vertical="top")
+    for row_idx in range(2, total_rows + 1):
+        for col_idx in center_cols:
+            ws.cell(row=row_idx, column=col_idx).alignment = center_top
+
+    # Freeze top row and auto filter
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
+    # Tab color
+    ws.sheet_properties.tabColor = TAB_COLOR_METADATA
+
+
+def apply_study_log_style(ws: Worksheet, font_name: str) -> None:
+    """Apply styling to the _study_log sheet.
+
+    Args:
+        ws: _study_log worksheet.
+        font_name: Font family name.
+    """
+    col_count = len(STUDY_LOG_HEADERS)
+    total_rows = ws.max_row
+
+    apply_header_style(ws, font_name, col_count)
+
+    if total_rows > 1:
+        apply_data_style(ws, font_name, col_count, total_rows)
+
+    # Column widths
+    for col_idx, width in enumerate(_STUDY_LOG_COL_WIDTHS, start=1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    # Freeze top row and auto filter
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
+    # Tab color
+    ws.sheet_properties.tabColor = TAB_COLOR_STUDY_LOG
+
+    # Conditional formatting: highlight "Not Started" status (col F)
+    if total_rows > 1:
+        not_started_fill = PatternFill(
+            start_color=NOT_STARTED_BG, end_color=NOT_STARTED_BG, fill_type="solid"
+        )
+        status_range = f"F2:F{total_rows}"
+        ws.conditional_formatting.add(
+            status_range,
+            CellIsRule(
+                operator="equal",
+                formula=['"Not Started"'],
+                fill=not_started_fill,
+            ),
+        )
+
+
+def apply_all_styles(wb: Workbook, font_name: str, data_sheet_name: str | None = None) -> None:
+    """Apply styles to all relevant sheets in the workbook.
+
+    Args:
+        wb: The workbook.
+        font_name: Font family name to use.
+        data_sheet_name: Name of the newly created data sheet (if any).
+    """
+    # Style _metadata
+    if METADATA_SHEET in wb.sheetnames:
+        apply_metadata_style(wb[METADATA_SHEET], font_name)
+
+    # Style _study_log
+    if STUDY_LOG_SHEET in wb.sheetnames:
+        apply_study_log_style(wb[STUDY_LOG_SHEET], font_name)
+
+    # Style the data sheet
+    if data_sheet_name and data_sheet_name in wb.sheetnames:
+        ws = wb[data_sheet_name]
+        segment_count = ws.max_row - 1  # subtract header
+        apply_data_sheet_style(ws, font_name, segment_count)
