@@ -157,3 +157,95 @@ def create_client(api_key: str) -> OpenAI:
         Configured OpenAI client.
     """
     return OpenAI(api_key=api_key)
+
+
+# Regex to strip markdown code block wrappers from LLM responses
+_MARKDOWN_JSON_RE = re.compile(r"^\s*```(?:json)?\s*\n?(.*?)\n?\s*```\s*$", re.DOTALL)
+
+
+def parse_translation_response(raw_content: str, expected_count: int) -> list[str]:
+    """Parse the translation response from the API.
+
+    Attempts JSON parsing directly first. If that fails, strips markdown
+    code block wrappers (```json ... ```) and retries.
+
+    Args:
+        raw_content: Raw response content string from the API.
+        expected_count: Expected number of translations.
+
+    Returns:
+        List of translated Korean strings.
+
+    Raises:
+        ValueError: If JSON parsing fails or response structure is invalid.
+    """
+    content = raw_content.strip()
+
+    # Try direct JSON parse first
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        # Fallback: strip markdown code block wrapper
+        match = _MARKDOWN_JSON_RE.match(content)
+        if match:
+            try:
+                data = json.loads(match.group(1))
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Failed to parse JSON from markdown block: {exc}"
+                ) from exc
+        else:
+            raise ValueError(f"Response is not valid JSON: {content[:200]}")
+
+    # Extract translations array
+    if isinstance(data, dict) and "translations" in data:
+        translations = data["translations"]
+    elif isinstance(data, list):
+        translations = data
+    else:
+        raise ValueError(
+            f"Unexpected response structure: expected dict with 'translations' key "
+            f"or a list, got {type(data).__name__}"
+        )
+
+    if not isinstance(translations, list):
+        raise ValueError(
+            f"'translations' must be a list, got {type(translations).__name__}"
+        )
+
+    return [str(t) for t in translations]
+
+
+def call_translation_api(
+    client: OpenAI,
+    batch: Batch,
+    model: str,
+) -> str:
+    """Call the OpenAI API for a single translation batch.
+
+    Args:
+        client: OpenAI client instance.
+        batch: Batch containing segments to translate and context.
+        model: Model name to use for translation.
+
+    Returns:
+        Raw response content string from the API.
+    """
+    translate_count = len(batch.translate_segments)
+    system_prompt = build_system_prompt(translate_count)
+    user_message = build_user_message(
+        batch.translate_segments,
+        batch.context_before,
+        batch.context_after,
+    )
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+        response_format={"type": "json_object"},
+    )
+
+    return response.choices[0].message.content or ""

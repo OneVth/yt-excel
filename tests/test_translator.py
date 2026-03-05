@@ -1,6 +1,18 @@
 """Tests for the translation engine."""
 
-from yt_excel.translator import Batch, build_batches, build_system_prompt, build_user_message
+import json
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from yt_excel.translator import (
+    Batch,
+    build_batches,
+    build_system_prompt,
+    build_user_message,
+    call_translation_api,
+    parse_translation_response,
+)
 from yt_excel.vtt import Segment
 
 
@@ -185,3 +197,103 @@ class TestBuildBatches:
         assert len(batches[1].translate_segments) == 1
         # Second batch should have 3 context_before (segments 8,9,10)
         assert len(batches[1].context_before) == 3
+
+
+class TestParseTranslationResponse:
+    """Tests for JSON response parsing."""
+
+    def test_valid_json_with_translations_key(self) -> None:
+        raw = json.dumps({"translations": ["번역1", "번역2", "번역3"]})
+        result = parse_translation_response(raw, expected_count=3)
+        assert result == ["번역1", "번역2", "번역3"]
+
+    def test_valid_json_array_directly(self) -> None:
+        raw = json.dumps(["번역1", "번역2"])
+        result = parse_translation_response(raw, expected_count=2)
+        assert result == ["번역1", "번역2"]
+
+    def test_markdown_code_block_wrapper(self) -> None:
+        inner = json.dumps({"translations": ["안녕", "세계"]})
+        raw = f"```json\n{inner}\n```"
+        result = parse_translation_response(raw, expected_count=2)
+        assert result == ["안녕", "세계"]
+
+    def test_markdown_code_block_no_language(self) -> None:
+        inner = json.dumps({"translations": ["안녕"]})
+        raw = f"```\n{inner}\n```"
+        result = parse_translation_response(raw, expected_count=1)
+        assert result == ["안녕"]
+
+    def test_invalid_json_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="not valid JSON"):
+            parse_translation_response("not json at all", expected_count=1)
+
+    def test_invalid_json_in_markdown_block(self) -> None:
+        raw = "```json\n{broken json\n```"
+        with pytest.raises(ValueError, match="Failed to parse JSON"):
+            parse_translation_response(raw, expected_count=1)
+
+    def test_unexpected_structure_raises_value_error(self) -> None:
+        raw = json.dumps({"wrong_key": "value"})
+        with pytest.raises(ValueError, match="Unexpected response structure"):
+            parse_translation_response(raw, expected_count=1)
+
+    def test_translations_not_a_list_raises_value_error(self) -> None:
+        raw = json.dumps({"translations": "not a list"})
+        with pytest.raises(ValueError, match="must be a list"):
+            parse_translation_response(raw, expected_count=1)
+
+    def test_non_string_items_converted_to_string(self) -> None:
+        raw = json.dumps({"translations": [123, True]})
+        result = parse_translation_response(raw, expected_count=2)
+        assert result == ["123", "True"]
+
+    def test_whitespace_around_json(self) -> None:
+        raw = "  \n" + json.dumps({"translations": ["테스트"]}) + "\n  "
+        result = parse_translation_response(raw, expected_count=1)
+        assert result == ["테스트"]
+
+
+class TestCallTranslationApi:
+    """Tests for the API calling function (mocked)."""
+
+    def test_calls_openai_with_correct_params(self) -> None:
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = json.dumps(
+            {"translations": ["안녕하세요"]}
+        )
+        mock_client.chat.completions.create.return_value = mock_response
+
+        batch = Batch(
+            translate_segments=[_make_segment(1, "Hello")],
+            context_before=[],
+            context_after=[],
+        )
+        result = call_translation_api(mock_client, batch, model="gpt-5-nano")
+
+        assert result == json.dumps({"translations": ["안녕하세요"]})
+
+        # Verify API was called with json_object response format
+        call_kwargs = mock_client.chat.completions.create.call_args[1]
+        assert call_kwargs["model"] == "gpt-5-nano"
+        assert call_kwargs["response_format"] == {"type": "json_object"}
+        assert len(call_kwargs["messages"]) == 2
+        assert call_kwargs["messages"][0]["role"] == "system"
+        assert call_kwargs["messages"][1]["role"] == "user"
+
+    def test_returns_empty_string_when_content_is_none(self) -> None:
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = None
+        mock_client.chat.completions.create.return_value = mock_response
+
+        batch = Batch(
+            translate_segments=[_make_segment(1, "Hello")],
+            context_before=[],
+            context_after=[],
+        )
+        result = call_translation_api(mock_client, batch, model="gpt-5-nano")
+        assert result == ""
