@@ -1,5 +1,6 @@
 """Excel reader/writer for Master.xlsx — initialization, integrity, and data operations."""
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -210,3 +211,103 @@ def check_duplicate(master_path: str | Path, video_id: str) -> None:
             )
 
     wb.close()
+
+
+# --- Sheet Naming ---
+
+# Excel sheet name maximum length
+_MAX_SHEET_NAME_LEN = 31
+
+# Forbidden characters in Excel sheet names and their replacements
+_CHAR_REPLACEMENTS = {
+    "/": "-",
+    "\\": "-",
+    "?": "",
+    "*": "",
+    "[": "(",
+    "]": ")",
+    ":": "-",
+}
+
+# Regex matching any forbidden character
+_FORBIDDEN_CHARS_RE = re.compile(r"[/\\?*\[\]:]")
+
+
+def sanitize_sheet_name(title: str) -> str:
+    """Convert a video title into a valid Excel sheet name.
+
+    Applies the naming rules from design doc section 8.3:
+    1. Replace forbidden characters (/ \\ ? * [ ] :)
+    2. Collapse consecutive whitespace to single space
+    3. Trim leading/trailing whitespace
+    4. Strip leading/trailing single quotes
+    5. Truncate to 31 characters (30 + ellipsis if needed)
+
+    Args:
+        title: Original video title.
+
+    Returns:
+        Sanitized sheet name, max 31 characters.
+    """
+    # 1. Replace forbidden characters
+    result = _FORBIDDEN_CHARS_RE.sub(lambda m: _CHAR_REPLACEMENTS[m.group()], title)
+
+    # 2. Collapse whitespace
+    result = re.sub(r"\s+", " ", result)
+
+    # 3. Trim
+    result = result.strip()
+
+    # 4. Strip leading/trailing single quotes
+    result = result.strip("'")
+
+    # 5. Truncate if over 31 chars
+    if len(result) > _MAX_SHEET_NAME_LEN:
+        result = result[:_MAX_SHEET_NAME_LEN - 1].rstrip() + "\u2026"
+
+    # Safety: if empty after sanitization, use fallback
+    if not result:
+        result = "Untitled"
+
+    return result
+
+
+def generate_unique_sheet_name(
+    title: str,
+    existing_names: list[str],
+) -> str:
+    """Generate a unique sheet name, appending (2), (3), etc. if needed.
+
+    If the sanitized name already exists among existing_names, appends
+    a numeric suffix. The suffix is included within the 31-char limit.
+
+    Args:
+        title: Original video title.
+        existing_names: List of existing sheet names in the workbook.
+
+    Returns:
+        Unique sheet name, max 31 characters.
+    """
+    base_name = sanitize_sheet_name(title)
+
+    if base_name not in existing_names:
+        return base_name
+
+    # Try incrementing suffix
+    counter = 2
+    while True:
+        suffix = f"({counter})"
+        max_base_len = _MAX_SHEET_NAME_LEN - len(suffix)
+
+        if len(base_name) > max_base_len:
+            # Re-truncate base to fit suffix
+            truncated = base_name[:max_base_len - 1].rstrip() + "\u2026"
+        else:
+            truncated = base_name
+
+        candidate = f"{truncated}{suffix}"
+
+        if candidate not in existing_names:
+            return candidate
+
+        counter += 1

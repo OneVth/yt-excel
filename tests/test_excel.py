@@ -14,7 +14,9 @@ from yt_excel.excel import (
     InitResult,
     check_duplicate,
     check_file_lock,
+    generate_unique_sheet_name,
     initialize_workbook,
+    sanitize_sheet_name,
 )
 
 
@@ -230,3 +232,111 @@ class TestCheckDuplicate:
         wb.save(str(path))
 
         check_duplicate(path, "anyVideoID01")
+
+
+class TestSanitizeSheetName:
+    """Tests for sanitize_sheet_name — character replacement and truncation."""
+
+    def test_normal_title_unchanged(self):
+        """Short title without special chars passes through unchanged."""
+        assert sanitize_sheet_name("How DNA Works") == "How DNA Works"
+
+    def test_slash_replaced(self):
+        """Forward slash is replaced with dash."""
+        assert sanitize_sheet_name("What is 1/0?") == "What is 1-0"
+
+    def test_backslash_replaced(self):
+        """Backslash is replaced with dash."""
+        assert sanitize_sheet_name("A\\B") == "A-B"
+
+    def test_question_mark_removed(self):
+        """Question mark is deleted."""
+        assert sanitize_sheet_name("Why?") == "Why"
+
+    def test_asterisk_removed(self):
+        """Asterisk is deleted."""
+        assert sanitize_sheet_name("A *New* Theory") == "A New Theory"
+
+    def test_brackets_replaced(self):
+        """Square brackets replaced with parentheses."""
+        assert sanitize_sheet_name("[Part 2]") == "(Part 2)"
+
+    def test_colon_replaced(self):
+        """Colon replaced with dash."""
+        assert sanitize_sheet_name("Topic: Intro") == "Topic- Intro"
+
+    def test_combined_special_chars(self):
+        """Multiple special chars in one title."""
+        result = sanitize_sheet_name("What is 1/0? [Part 2]: A *New* Theory")
+        assert result == "What is 1-0 (Part 2)- A New Th\u2026"
+        assert len(result) <= 31
+
+    def test_truncation_at_31_chars(self):
+        """Titles longer than 31 chars are truncated with ellipsis."""
+        title = "The Incredible Journey of a Red Blood Cell"
+        result = sanitize_sheet_name(title)
+        assert len(result) == 31
+        assert result.endswith("\u2026")
+        assert result == "The Incredible Journey of a Re\u2026"
+
+    def test_trailing_space_stripped_after_truncation(self):
+        """Trailing space before ellipsis is removed."""
+        # 30th char would be a space: "X" * 29 + " " + "more"
+        title = "A" * 29 + " " + "more text here"
+        result = sanitize_sheet_name(title)
+        assert len(result) <= 31
+        assert not result[-2:-1].isspace()
+
+    def test_leading_trailing_quotes_stripped(self):
+        """Leading and trailing single quotes are removed."""
+        assert sanitize_sheet_name("'Hello World'") == "Hello World"
+
+    def test_empty_title_fallback(self):
+        """Empty or all-forbidden title gets fallback name."""
+        assert sanitize_sheet_name("???") == "Untitled"
+        assert sanitize_sheet_name("") == "Untitled"
+
+    def test_consecutive_whitespace_collapsed(self):
+        """Multiple spaces/tabs are collapsed to single space."""
+        assert sanitize_sheet_name("A   B\tC") == "A B C"
+
+
+class TestGenerateUniqueSheetName:
+    """Tests for generate_unique_sheet_name — deduplication with suffix."""
+
+    def test_unique_name_no_suffix(self):
+        """Unique name returns without suffix."""
+        result = generate_unique_sheet_name("How DNA Works", [])
+        assert result == "How DNA Works"
+
+    def test_duplicate_gets_suffix_2(self):
+        """First duplicate gets (2) suffix."""
+        existing = ["How DNA Works"]
+        result = generate_unique_sheet_name("How DNA Works", existing)
+        assert result == "How DNA Works(2)"
+
+    def test_multiple_duplicates(self):
+        """Multiple duplicates increment suffix correctly."""
+        existing = ["How DNA Works", "How DNA Works(2)"]
+        result = generate_unique_sheet_name("How DNA Works", existing)
+        assert result == "How DNA Works(3)"
+
+    def test_long_title_with_suffix_stays_within_31(self):
+        """Long title is further truncated to accommodate suffix."""
+        title = "The Incredible Journey of a Red Blood Cell"
+        # First one gets normal truncation
+        first = sanitize_sheet_name(title)
+        assert len(first) == 31
+
+        # Second one needs suffix, base must be shortened
+        result = generate_unique_sheet_name(title, [first])
+        assert len(result) <= 31
+        assert result.endswith("(2)")
+
+    def test_suffix_with_exact_31_char_name(self):
+        """Name exactly at 31 chars gets truncated for suffix."""
+        title = "A" * 31
+        existing = [sanitize_sheet_name(title)]
+        result = generate_unique_sheet_name(title, existing)
+        assert len(result) <= 31
+        assert "(2)" in result
