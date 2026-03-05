@@ -1,7 +1,12 @@
-"""YouTube URL parsing and video_id extraction."""
+"""YouTube URL parsing, metadata fetching, and caption downloading."""
 
 import re
+from dataclasses import dataclass
 from urllib.parse import parse_qs, urlparse
+
+import yt_dlp
+
+from yt_excel.retry import RetryExhaustedError, with_retry
 
 
 # YouTube video ID is always 11 characters: alphanumeric, dash, underscore
@@ -80,3 +85,70 @@ def extract_video_id(url: str) -> str:
         )
 
     return video_id
+
+
+@dataclass
+class VideoMeta:
+    """Video metadata fetched from YouTube."""
+
+    video_id: str
+    title: str
+    channel: str
+    duration: str  # "HH:MM:SS"
+
+
+# Retryable network errors from yt-dlp
+_RETRYABLE_ERRORS = (
+    yt_dlp.utils.DownloadError,
+    yt_dlp.utils.ExtractorError,
+    ConnectionError,
+    TimeoutError,
+    OSError,
+)
+
+
+def _format_duration(seconds: int | float) -> str:
+    """Convert seconds to HH:MM:SS format."""
+    total = int(seconds)
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    secs = total % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+@with_retry(max_retries=3, retryable=_RETRYABLE_ERRORS)
+def fetch_metadata(video_id: str) -> VideoMeta:
+    """Fetch video metadata (title, channel, duration) via yt-dlp.
+
+    Args:
+        video_id: 11-character YouTube video ID.
+
+    Returns:
+        VideoMeta with title, channel name, and duration.
+
+    Raises:
+        RetryExhaustedError: If all retry attempts fail.
+    """
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    if info is None:
+        raise yt_dlp.utils.DownloadError(f"Failed to fetch info for {video_id}")
+
+    title = info.get("title", "Unknown")
+    channel = info.get("channel", info.get("uploader", "Unknown"))
+    duration_sec = info.get("duration", 0)
+
+    return VideoMeta(
+        video_id=video_id,
+        title=title,
+        channel=channel,
+        duration=_format_duration(duration_sec),
+    )
