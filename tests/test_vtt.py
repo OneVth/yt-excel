@@ -2,7 +2,14 @@
 
 from pathlib import Path
 
-from yt_excel.vtt import Segment, parse_vtt, strip_markup, strip_markup_segments
+from yt_excel.vtt import (
+    Segment,
+    parse_vtt,
+    remove_non_verbal,
+    remove_non_verbal_segments,
+    strip_markup,
+    strip_markup_segments,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -263,3 +270,118 @@ class TestStripMarkupSegments:
         assert result[0].start == "00:00:01.000"
         assert result[0].end == "00:00:04.500"
         assert result[0].english == "Hello & world"
+
+
+# --- remove_non_verbal tests ---
+
+
+class TestRemoveNonVerbalBrackets:
+    """Test [bracketed] non-verbal text removal."""
+
+    def test_music_removed(self) -> None:
+        assert remove_non_verbal("[Music]") == ""
+
+    def test_applause_removed(self) -> None:
+        assert remove_non_verbal("[Applause]") == ""
+
+    def test_laughter_removed(self) -> None:
+        assert remove_non_verbal("[Laughter]") == ""
+
+    def test_music_playing_removed(self) -> None:
+        assert remove_non_verbal("[Music playing]") == ""
+
+    def test_mixed_with_speech(self) -> None:
+        result = remove_non_verbal("Thank you! [Laughter] That was great.")
+        assert result == "Thank you! That was great."
+
+    def test_multiple_brackets(self) -> None:
+        result = remove_non_verbal("[Music] Hello [Applause] world [Music]")
+        assert result == "Hello world"
+
+
+class TestRemoveNonVerbalParens:
+    """Test (parenthesized) non-verbal text removal."""
+
+    def test_laughs_removed(self) -> None:
+        assert remove_non_verbal("(Laughs)") == ""
+
+    def test_applause_paren_removed(self) -> None:
+        assert remove_non_verbal("(Applause)") == ""
+
+    def test_mixed_paren_with_speech(self) -> None:
+        result = remove_non_verbal("Hello (Laughs) there")
+        assert result == "Hello there"
+
+
+class TestRemoveNonVerbalMusicSymbols:
+    """Test music symbol removal."""
+
+    def test_music_notes_removed(self) -> None:
+        assert remove_non_verbal("\u266a \u266a") == ""
+
+    def test_multiple_notes(self) -> None:
+        assert remove_non_verbal("\u266a\u266b\u266c") == ""
+
+    def test_notes_with_text(self) -> None:
+        result = remove_non_verbal("\u266a Hello \u266a")
+        assert result == "Hello"
+
+
+class TestRemoveNonVerbalFixture:
+    """Test non-verbal removal with fixture file."""
+
+    def test_non_verbal_fixture_full_removal(self) -> None:
+        content = _read_fixture("non_verbal.vtt")
+        segments = parse_vtt(content)
+        stripped = strip_markup_segments(segments)
+        result = remove_non_verbal_segments(stripped)
+        # [Music], [Applause], (Laughs), music notes, [Music playing] are full non-verbal
+        # "Hello and welcome" and "And now let's get started" are speech
+        # "Thank you! [Laughter] That was great." has mixed content
+        texts = [s.english for s in result]
+        assert "Hello and welcome to the show." in texts
+        assert "Thank you! That was great." in texts
+        assert "And now let's get started." in texts
+
+    def test_non_verbal_fixture_no_music_segments(self) -> None:
+        content = _read_fixture("non_verbal.vtt")
+        segments = parse_vtt(content)
+        stripped = strip_markup_segments(segments)
+        result = remove_non_verbal_segments(stripped)
+        for seg in result:
+            assert "[Music]" not in seg.english
+            assert "[Applause]" not in seg.english
+            assert "(Laughs)" not in seg.english
+
+
+class TestRemoveNonVerbalSegments:
+    """Test remove_non_verbal_segments list processing."""
+
+    def test_removes_full_non_verbal_segments(self) -> None:
+        segments = [
+            Segment(1, "00:00:00.500", "00:00:02.000", "[Music]"),
+            Segment(2, "00:00:02.500", "00:00:05.000", "Hello world"),
+        ]
+        result = remove_non_verbal_segments(segments)
+        assert len(result) == 1
+        assert result[0].english == "Hello world"
+
+    def test_reindexes_after_removal(self) -> None:
+        segments = [
+            Segment(1, "00:00:00.500", "00:00:02.000", "[Music]"),
+            Segment(2, "00:00:02.500", "00:00:05.000", "Hello"),
+            Segment(3, "00:00:05.500", "00:00:07.000", "[Applause]"),
+            Segment(4, "00:00:07.500", "00:00:10.000", "World"),
+        ]
+        result = remove_non_verbal_segments(segments)
+        assert len(result) == 2
+        assert result[0].index == 1
+        assert result[1].index == 2
+
+    def test_keeps_mixed_content(self) -> None:
+        segments = [
+            Segment(1, "00:00:01.000", "00:00:04.000", "Thank you! [Laughter] Great."),
+        ]
+        result = remove_non_verbal_segments(segments)
+        assert len(result) == 1
+        assert result[0].english == "Thank you! Great."

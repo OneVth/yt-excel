@@ -189,3 +189,64 @@ def strip_markup_segments(segments: list[Segment]) -> list[Segment]:
             ))
             index += 1
     return result
+
+
+# --- Non-verbal Text Filter ---
+
+# Bracketed non-verbal: [Music], [Applause], [Laughter], [Music playing], etc.
+_BRACKET_NONVERBAL_RE = re.compile(r"\[[^\]]*\]")
+
+# Parenthesized non-verbal: (Laughs), (Applause), (Music), etc.
+_PAREN_NONVERBAL_RE = re.compile(r"\([^)]*\)")
+
+# Musical notes: various unicode music symbols
+_MUSIC_SYMBOL_RE = re.compile(r"[♪♫♬♩]+[\s♪♫♬♩]*")
+
+
+def remove_non_verbal(text: str) -> str:
+    """Remove non-verbal text markers from subtitle text.
+
+    Removes:
+    - Bracketed descriptions: [Music], [Applause], [Laughter], etc.
+    - Parenthesized descriptions: (Laughs), (Music), etc.
+    - Musical note symbols: various combinations
+
+    If the entire text is non-verbal, returns empty string.
+    If mixed with speech, only the non-verbal portions are removed.
+
+    Args:
+        text: Subtitle text (should already be markup-stripped).
+
+    Returns:
+        Text with non-verbal markers removed, whitespace collapsed.
+    """
+    result = _BRACKET_NONVERBAL_RE.sub("", text)
+    result = _PAREN_NONVERBAL_RE.sub("", result)
+    result = _MUSIC_SYMBOL_RE.sub("", result)
+    result = re.sub(r"\s+", " ", result)
+    return result.strip()
+
+
+def remove_non_verbal_segments(segments: list[Segment]) -> list[Segment]:
+    """Apply non-verbal removal to all segments, dropping empty results.
+
+    Args:
+        segments: List of Segment objects (should already be markup-stripped).
+
+    Returns:
+        New list with non-verbal text removed. Segments that become empty
+        after removal are excluded and remaining segments are reindexed.
+    """
+    result: list[Segment] = []
+    index = 1
+    for seg in segments:
+        cleaned = remove_non_verbal(seg.english)
+        if cleaned:
+            result.append(Segment(
+                index=index,
+                start=seg.start,
+                end=seg.end,
+                english=cleaned,
+            ))
+            index += 1
+    return result
