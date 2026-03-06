@@ -4,6 +4,7 @@ import logging
 
 import pytest
 
+from yt_excel.cli import Output
 from yt_excel.logger import _teardown_logging, get_logger, setup_logging
 
 
@@ -224,3 +225,91 @@ class TestLoggingConfig:
         assert config.logging.enabled is False
         assert config.logging.dir == "./custom_logs"
         assert config.logging.level == "INFO"
+
+
+class TestOutputLoggingIntegration:
+    """Tests that Output methods write to the log file."""
+
+    def _flush_handlers(self):
+        for handler in logging.getLogger("yt_excel").handlers:
+            handler.flush()
+
+    def _read_log(self, log_file):
+        self._flush_handlers()
+        return log_file.read_text(encoding="utf-8")
+
+    def test_success_logs_info(self, tmp_path):
+        """Output.success() logs at INFO level."""
+        log_file = setup_logging(enabled=True, log_dir=str(tmp_path))
+        out = Output(mode="normal")
+        out.success("Step completed")
+        content = self._read_log(log_file)
+        assert "Step completed" in content
+        assert "[INFO ]" in content
+
+    def test_info_logs_info(self, tmp_path):
+        """Output.info() logs at INFO level."""
+        log_file = setup_logging(enabled=True, log_dir=str(tmp_path))
+        out = Output(mode="normal")
+        out.info("General info")
+        content = self._read_log(log_file)
+        assert "General info" in content
+
+    def test_warning_logs_warning(self, tmp_path):
+        """Output.warning() logs at WARNING level."""
+        log_file = setup_logging(enabled=True, log_dir=str(tmp_path))
+        out = Output(mode="normal")
+        out.warning("Something warned")
+        content = self._read_log(log_file)
+        assert "Something warned" in content
+        assert "[WARN " in content or "[WARNING]" in content
+
+    def test_error_logs_error(self, tmp_path):
+        """Output.error() logs at ERROR level."""
+        log_file = setup_logging(enabled=True, log_dir=str(tmp_path))
+        out = Output(mode="normal")
+        out.error("Critical failure")
+        content = self._read_log(log_file)
+        assert "Critical failure" in content
+        assert "[ERROR]" in content
+
+    def test_step_logs_info(self, tmp_path):
+        """Output.step() logs at INFO level."""
+        log_file = setup_logging(enabled=True, log_dir=str(tmp_path))
+        out = Output(mode="normal")
+        out.step("\U0001f50d", "Fetching video info...")
+        content = self._read_log(log_file)
+        assert "Fetching video info..." in content
+
+    def test_detail_logs_info(self, tmp_path):
+        """Output.detail() logs at INFO level."""
+        log_file = setup_logging(enabled=True, log_dir=str(tmp_path))
+        out = Output(mode="normal")
+        out.detail("Title: Test Video")
+        content = self._read_log(log_file)
+        assert "Title: Test Video" in content
+
+    def test_verbose_logs_debug(self, tmp_path):
+        """Output.verbose() logs at DEBUG level."""
+        log_file = setup_logging(enabled=True, log_dir=str(tmp_path))
+        out = Output(mode="normal")
+        out.verbose("Language code: en")
+        content = self._read_log(log_file)
+        assert "Language code: en" in content
+        assert "[DEBUG]" in content
+
+    def test_quiet_mode_still_logs(self, tmp_path):
+        """Even in quiet mode, all messages go to the log file."""
+        log_file = setup_logging(enabled=True, log_dir=str(tmp_path))
+        out = Output(mode="quiet")
+        out.success("Quiet success")
+        out.info("Quiet info")
+        out.step("\U0001f50d", "Quiet step")
+        out.detail("Quiet detail")
+        out.verbose("Quiet verbose")
+        content = self._read_log(log_file)
+        assert "Quiet success" in content
+        assert "Quiet info" in content
+        assert "Quiet step" in content
+        assert "Quiet detail" in content
+        assert "Quiet verbose" in content

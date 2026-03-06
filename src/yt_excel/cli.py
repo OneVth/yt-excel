@@ -1,6 +1,7 @@
 """CLI entrypoint and pipeline orchestration."""
 
 import argparse
+import logging
 import sys
 import time
 from datetime import datetime, timezone
@@ -11,6 +12,7 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 
 from yt_excel import __version__
 from yt_excel.config import AppConfig, load_config
+from yt_excel.logger import setup_logging
 from yt_excel.environment import validate_api_key
 from yt_excel.excel import (
     DuplicateVideoError,
@@ -54,6 +56,7 @@ from yt_excel.youtube import (
 # --- Output Utility ---
 
 _console = Console(stderr=True)
+_logger = logging.getLogger("yt_excel.cli")
 
 
 class Output:
@@ -61,6 +64,7 @@ class Output:
 
     Manages output verbosity based on mode (normal/verbose/quiet)
     and provides consistent emoji-prefixed messages per design doc 13.3.
+    All messages are simultaneously logged to file via the logging module.
     """
 
     def __init__(self, mode: str = "normal") -> None:
@@ -68,6 +72,7 @@ class Output:
 
     def success(self, message: str, indent: int = 0) -> None:
         """Print a success message (green checkmark)."""
+        _logger.info(message)
         if self.mode == "quiet":
             return
         prefix = "   " * indent
@@ -75,6 +80,7 @@ class Output:
 
     def info(self, message: str, indent: int = 0) -> None:
         """Print an info message (blue info icon)."""
+        _logger.info(message)
         if self.mode == "quiet":
             return
         prefix = "   " * indent
@@ -82,22 +88,26 @@ class Output:
 
     def warning(self, message: str, indent: int = 0) -> None:
         """Print a warning message (yellow warning icon)."""
+        _logger.warning(message)
         prefix = "   " * indent
         _console.print(f"{prefix}[yellow]\u26a0 {message}[/yellow]")
 
     def error(self, message: str, indent: int = 0) -> None:
         """Print an error message (red cross)."""
+        _logger.error(message)
         prefix = "   " * indent
         _console.print(f"{prefix}[red]\u274c {message}[/red]")
 
     def step(self, emoji: str, message: str) -> None:
         """Print a pipeline step header (e.g. emoji + description)."""
+        _logger.info(message)
         if self.mode == "quiet":
             return
         _console.print(f"\n{emoji} {message}")
 
     def detail(self, message: str, indent: int = 1) -> None:
         """Print an indented detail line (shown in normal and verbose modes)."""
+        _logger.info(message)
         if self.mode == "quiet":
             return
         prefix = "   " * indent
@@ -105,6 +115,7 @@ class Output:
 
     def verbose(self, message: str, indent: int = 1) -> None:
         """Print a verbose-only detail line."""
+        _logger.debug(message)
         if self.mode != "verbose":
             return
         prefix = "   " * indent
@@ -187,8 +198,19 @@ def main() -> None:
     if args.quiet:
         config.ui.default_mode = "quiet"
 
+    # Set up file logging
+    log_file = setup_logging(
+        enabled=config.logging.enabled,
+        log_dir=config.logging.dir,
+        level=config.logging.level,
+    )
+
     out = Output(config.ui.default_mode)
     pipeline_start = time.monotonic()
+
+    _logger.info("Pipeline started: %s", args.url)
+    if log_file:
+        _logger.info("Log file: %s", log_file)
 
     _run_pipeline(args, config, out, pipeline_start)
 
@@ -443,6 +465,7 @@ def _run_pipeline(
     )
     out.detail(f"Cost: ~${cost:.4f}")
     out.detail(f"Time: {elapsed:.1f}s")
+    _logger.info("Pipeline completed in %.1fs", elapsed)
 
 
 def _translate_with_progress(
