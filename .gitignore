@@ -23,3 +23,4 @@ Desktop.ini
 *.xlsx
 .env
 docs/_onev/
+logs/

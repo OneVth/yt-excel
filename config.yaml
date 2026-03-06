@@ -24,3 +24,9 @@ style:
 # UX 설정
 ui:
   default_mode: "normal"        # normal / verbose / quiet
+
+# 로그 설정
+logging:
+  enabled: true                 # 파일 로깅 활성화 (기본: true)
+  dir: "./logs"                 # 로그 디렉토리 경로
+  level: "DEBUG"                # 파일 로그 레벨
