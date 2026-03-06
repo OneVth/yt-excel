@@ -1,6 +1,7 @@
 """CLI entrypoint and pipeline orchestration."""
 
 import argparse
+import asyncio
 import logging
 import sys
 import time
@@ -31,9 +32,11 @@ from yt_excel.excel import (
 from yt_excel.translator import (
     TranslationResult,
     build_batches,
+    create_async_client,
     create_client,
     translate_batch_with_retry,
     translate_segments,
+    translate_segments_async,
 )
 from yt_excel.vtt import (
     Segment,
@@ -381,13 +384,21 @@ def _run_pipeline(
         return
 
     # --- Step 9: Translation ---
-    out.step("\U0001f310", f"Translating ({config.translation.model})...")
+    async_mode = config.translation.async_enabled
+    mode_label = "async" if async_mode else "sync"
+    out.step("\U0001f310", f"Translating ({config.translation.model}, {mode_label})...")
 
-    client = create_client(api_key)
     try:
-        translation_result = _translate_with_progress(
-            client, final_segments, config, out,
-        )
+        if async_mode:
+            async_client = create_async_client(api_key)
+            translation_result = _translate_async_with_progress(
+                async_client, final_segments, config, out,
+            )
+        else:
+            client = create_client(api_key)
+            translation_result = _translate_with_progress(
+                client, final_segments, config, out,
+            )
     except Exception as e:
         out.error(f"Translation failed: {e}")
         sys.exit(1)
@@ -540,6 +551,55 @@ def _translate_with_progress(
         success_count=success_count,
         failed_count=failed_count,
     )
+
+
+def _translate_async_with_progress(
+    client: "AsyncOpenAI",  # type: ignore[name-defined]
+    segments: list[Segment],
+    config: AppConfig,
+    out: Output,
+) -> TranslationResult:
+    """Run async translation with a rich progress bar.
+
+    In quiet mode, falls back to async without progress bar.
+
+    Args:
+        client: AsyncOpenAI client instance.
+        segments: Segments to translate.
+        config: Application configuration.
+        out: Output utility.
+
+    Returns:
+        TranslationResult with translated segments.
+    """
+    if out.mode == "quiet":
+        return asyncio.run(
+            translate_segments_async(client, segments, config.translation)
+        )
+
+    progress = Progress(
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.percentage:>3.0f}%"),
+        TextColumn("({task.completed}/{task.total})"),
+        TimeRemainingColumn(),
+        console=_console,
+    )
+
+    with progress:
+        task = progress.add_task("Translating", total=len(segments))
+
+        def on_batch_complete(count: int) -> None:
+            progress.update(task, advance=count)
+
+        result = asyncio.run(
+            translate_segments_async(
+                client, segments, config.translation,
+                on_batch_complete=on_batch_complete,
+            )
+        )
+
+    return result
 
 
 def _estimate_cost(segment_count: int, model: str) -> float:

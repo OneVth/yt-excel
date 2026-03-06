@@ -65,6 +65,7 @@ def _make_config(tmp_path: Path) -> AppConfig:
     config.file.master_path = str(tmp_path / "Master.xlsx")
     config.translation.max_retries = 1
     config.translation.request_interval_ms = 0
+    config.translation.async_enabled = False
     return config
 
 
