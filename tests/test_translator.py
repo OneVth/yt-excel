@@ -596,6 +596,139 @@ class TestTranslateBatchWithRetryAsync:
         assert result == ["", ""]
         assert mock_client.chat.completions.create.await_count == 3
 
+    @pytest.mark.asyncio
+    @patch("yt_excel.translator.asyncio.sleep", new_callable=AsyncMock)
+    async def test_rate_limit_429_retry_with_retry_after(
+        self, mock_sleep: AsyncMock,
+    ) -> None:
+        from openai import RateLimitError
+
+        mock_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 429
+        mock_resp.headers = {"retry-after": "3"}
+        mock_resp.json.return_value = {"error": {"message": "rate limited"}}
+        rate_err = RateLimitError(
+            message="rate limited",
+            response=mock_resp,
+            body={"error": {"message": "rate limited"}},
+        )
+        good_response = _make_async_response(["성공"])
+
+        mock_client.chat.completions.create = AsyncMock(
+            side_effect=[rate_err, good_response]
+        )
+        batch = Batch(
+            translate_segments=[_make_segment(1, "Hello")],
+            context_before=[],
+            context_after=[],
+        )
+        idx, result = await translate_batch_with_retry_async(
+            mock_client, batch, batch_idx=0, total_batches=1,
+            model="gpt-5-nano", max_retries=3, request_interval_ms=0,
+        )
+        assert result == ["성공"]
+        # Should have slept with retry-after value (3.0)
+        sleep_calls = [c.args[0] for c in mock_sleep.call_args_list]
+        assert 3.0 in sleep_calls
+
+    @pytest.mark.asyncio
+    @patch("yt_excel.translator.asyncio.sleep", new_callable=AsyncMock)
+    async def test_network_error_retry(self, mock_sleep: AsyncMock) -> None:
+        from openai import APIConnectionError
+
+        mock_client = MagicMock()
+        conn_err = APIConnectionError(request=MagicMock())
+        good_response = _make_async_response(["네트워크복구"])
+
+        mock_client.chat.completions.create = AsyncMock(
+            side_effect=[conn_err, good_response]
+        )
+        batch = Batch(
+            translate_segments=[_make_segment(1, "Hello")],
+            context_before=[],
+            context_after=[],
+        )
+        idx, result = await translate_batch_with_retry_async(
+            mock_client, batch, batch_idx=0, total_batches=1,
+            model="gpt-5-nano", max_retries=3, request_interval_ms=0,
+        )
+        assert result == ["네트워크복구"]
+        assert mock_client.chat.completions.create.await_count == 2
+
+    @pytest.mark.asyncio
+    @patch("yt_excel.translator.asyncio.sleep", new_callable=AsyncMock)
+    async def test_timeout_error_retry(self, mock_sleep: AsyncMock) -> None:
+        from openai import APITimeoutError
+
+        mock_client = MagicMock()
+        timeout_err = APITimeoutError(request=MagicMock())
+        good_response = _make_async_response(["타임아웃복구"])
+
+        mock_client.chat.completions.create = AsyncMock(
+            side_effect=[timeout_err, good_response]
+        )
+        batch = Batch(
+            translate_segments=[_make_segment(1, "Hello")],
+            context_before=[],
+            context_after=[],
+        )
+        idx, result = await translate_batch_with_retry_async(
+            mock_client, batch, batch_idx=0, total_batches=1,
+            model="gpt-5-nano", max_retries=3, request_interval_ms=0,
+        )
+        assert result == ["타임아웃복구"]
+
+    @pytest.mark.asyncio
+    @patch("yt_excel.translator.asyncio.sleep", new_callable=AsyncMock)
+    async def test_shortage_retry_then_success(self, mock_sleep: AsyncMock) -> None:
+        """Array length mismatch triggers retry, then succeeds."""
+        mock_client = MagicMock()
+        # First response: 1 item when 2 expected; second: correct
+        responses = [
+            _make_async_response(["only_one"]),
+            _make_async_response(["번역1", "번역2"]),
+        ]
+        mock_client.chat.completions.create = AsyncMock(side_effect=responses)
+
+        batch = Batch(
+            translate_segments=[_make_segment(1, "Hello"), _make_segment(2, "World")],
+            context_before=[],
+            context_after=[],
+        )
+        idx, result = await translate_batch_with_retry_async(
+            mock_client, batch, batch_idx=0, total_batches=1,
+            model="gpt-5-nano", max_retries=3, request_interval_ms=0,
+        )
+        assert result == ["번역1", "번역2"]
+        assert mock_client.chat.completions.create.await_count == 2
+
+    @pytest.mark.asyncio
+    @patch("yt_excel.translator.asyncio.sleep", new_callable=AsyncMock)
+    async def test_exponential_backoff_on_value_error(
+        self, mock_sleep: AsyncMock,
+    ) -> None:
+        """Verify exponential backoff timing on repeated failures."""
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(
+            side_effect=ValueError("always fails")
+        )
+        batch = Batch(
+            translate_segments=[_make_segment(1, "Hello")],
+            context_before=[],
+            context_after=[],
+        )
+        await translate_batch_with_retry_async(
+            mock_client, batch, batch_idx=0, total_batches=1,
+            model="gpt-5-nano", max_retries=3, request_interval_ms=0,
+        )
+        # Sleep calls: interval(0) + backoff(1.0), interval(0) + backoff(2.0),
+        #              interval(0) + backoff(4.0)
+        sleep_values = [c.args[0] for c in mock_sleep.call_args_list]
+        # Filter out the 0.0 interval sleeps
+        backoff_values = [v for v in sleep_values if v > 0]
+        assert backoff_values == [1.0, 2.0, 4.0]
+
 
 class TestTranslateSegmentsAsync:
     """Tests for the full async translation pipeline."""
