@@ -1,12 +1,16 @@
 """YouTube URL parsing, metadata fetching, and caption downloading."""
 
 import re
+import time
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlparse
 
 import yt_dlp
 
+from yt_excel.logger import get_logger
 from yt_excel.retry import RetryExhaustedError, with_retry
+
+_logger = get_logger(__name__)
 
 
 # YouTube video ID is always 11 characters: alphanumeric, dash, underscore
@@ -146,6 +150,7 @@ def fetch_metadata(video_id: str) -> VideoMeta:
     Raises:
         RetryExhaustedError: If all retry attempts fail.
     """
+    start = time.monotonic()
     url = f"https://www.youtube.com/watch?v={video_id}"
     ydl_opts = {
         "quiet": True,
@@ -162,6 +167,11 @@ def fetch_metadata(video_id: str) -> VideoMeta:
     title = info.get("title", "Unknown")
     channel = info.get("channel", info.get("uploader", "Unknown"))
     duration_sec = info.get("duration", 0)
+
+    elapsed = time.monotonic() - start
+    _logger.info(
+        "Video metadata fetched in %.2fs — Title: %s", elapsed, title,
+    )
 
     return VideoMeta(
         video_id=video_id,
@@ -305,6 +315,7 @@ def download_captions(video_id: str, lang_code: str) -> str:
         RetryExhaustedError: If all retry attempts fail.
         CaptionNotFoundError: If the requested caption track is not available.
     """
+    start = time.monotonic()
     url = f"https://www.youtube.com/watch?v={video_id}"
 
     # Use yt-dlp to get subtitle URL, then fetch content
@@ -339,11 +350,16 @@ def download_captions(video_id: str, lang_code: str) -> str:
         with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
             # Use yt-dlp's url opener to handle cookies/headers
             response = ydl.urlopen(sub_url)
-            return response.read().decode("utf-8")
+            content = response.read().decode("utf-8")
+            elapsed = time.monotonic() - start
+            _logger.info("Captions downloaded in %.2fs (lang=%s)", elapsed, lang_code)
+            return content
 
     # If yt-dlp already provides the data inline
     sub_data = sub_info.get("data")
     if sub_data:
+        elapsed = time.monotonic() - start
+        _logger.info("Captions downloaded in %.2fs (lang=%s, inline)", elapsed, lang_code)
         return sub_data
 
     raise CaptionNotFoundError(

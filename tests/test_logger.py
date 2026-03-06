@@ -1,6 +1,7 @@
 """Tests for the file logging system."""
 
 import logging
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -313,3 +314,165 @@ class TestOutputLoggingIntegration:
         assert "Quiet step" in content
         assert "Quiet detail" in content
         assert "Quiet verbose" in content
+
+
+class TestBatchTimingLogs:
+    """Tests that translator logs batch timing information."""
+
+    def _flush_handlers(self):
+        for handler in logging.getLogger("yt_excel").handlers:
+            handler.flush()
+
+    def _read_log(self, log_file):
+        self._flush_handlers()
+        return log_file.read_text(encoding="utf-8")
+
+    def test_batch_completion_logged(self, tmp_path):
+        """translate_batch_with_retry logs batch completion with timing."""
+        from yt_excel.translator import Batch, translate_batch_with_retry
+        from yt_excel.vtt import Segment
+
+        log_file = setup_logging(enabled=True, log_dir=str(tmp_path))
+
+        segments = [
+            Segment(index=1, start="00:00:01.000", end="00:00:02.000", english="Hello"),
+            Segment(index=2, start="00:00:02.000", end="00:00:03.000", english="World"),
+        ]
+        batch = Batch(translate_segments=segments, context_before=[], context_after=[])
+
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = '{"translations": ["안녕", "세계"]}'
+        mock_client.chat.completions.create.return_value = mock_response
+
+        translate_batch_with_retry(
+            client=mock_client,
+            batch=batch,
+            model="gpt-5-nano",
+            max_retries=3,
+            request_interval_ms=0,
+        )
+
+        content = self._read_log(log_file)
+        assert "Batch completed in" in content
+        assert "2 segments" in content
+
+    def test_batch_retry_logged(self, tmp_path):
+        """Retry attempts are logged with timing info."""
+        from yt_excel.translator import Batch, translate_batch_with_retry
+        from yt_excel.vtt import Segment
+
+        log_file = setup_logging(enabled=True, log_dir=str(tmp_path))
+
+        segments = [
+            Segment(index=1, start="00:00:01.000", end="00:00:02.000", english="Hello"),
+        ]
+        batch = Batch(translate_segments=segments, context_before=[], context_after=[])
+
+        mock_client = MagicMock()
+        # First call returns wrong count, second succeeds
+        mock_response_bad = MagicMock()
+        mock_response_bad.choices = [MagicMock()]
+        mock_response_bad.choices[0].message.content = '{"translations": []}'
+
+        mock_response_good = MagicMock()
+        mock_response_good.choices = [MagicMock()]
+        mock_response_good.choices[0].message.content = '{"translations": ["안녕"]}'
+
+        mock_client.chat.completions.create.side_effect = [
+            mock_response_bad,
+            mock_response_good,
+        ]
+
+        translate_batch_with_retry(
+            client=mock_client,
+            batch=batch,
+            model="gpt-5-nano",
+            max_retries=3,
+            request_interval_ms=0,
+        )
+
+        content = self._read_log(log_file)
+        assert "retry=1" in content
+
+    def test_translation_start_and_complete_logged(self, tmp_path):
+        """translate_segments logs start and completion with timing."""
+        from yt_excel.config import TranslationConfig
+        from yt_excel.translator import translate_segments
+        from yt_excel.vtt import Segment
+
+        log_file = setup_logging(enabled=True, log_dir=str(tmp_path))
+
+        segments = [
+            Segment(index=1, start="00:00:01.000", end="00:00:02.000", english="Hello"),
+        ]
+        config = TranslationConfig(
+            model="gpt-5-nano",
+            batch_size=10,
+            request_interval_ms=0,
+        )
+
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = '{"translations": ["안녕"]}'
+        mock_client.chat.completions.create.return_value = mock_response
+
+        translate_segments(mock_client, segments, config)
+
+        content = self._read_log(log_file)
+        assert "Translation started: 1 batches" in content
+        assert "batch_size=10" in content
+        assert "model=gpt-5-nano" in content
+        assert "Translation complete: 1 success, 0 failed" in content
+
+    def test_metadata_fetch_logged(self, tmp_path):
+        """fetch_metadata logs timing when successful."""
+        log_file = setup_logging(enabled=True, log_dir=str(tmp_path))
+
+        mock_info = {
+            "title": "Test Video",
+            "channel": "Test Channel",
+            "duration": 120,
+        }
+
+        with patch("yt_excel.youtube.yt_dlp.YoutubeDL") as mock_ydl_class:
+            mock_ydl = MagicMock()
+            mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+            mock_ydl.__exit__ = MagicMock(return_value=False)
+            mock_ydl.extract_info.return_value = mock_info
+            mock_ydl_class.return_value = mock_ydl
+
+            from yt_excel.youtube import fetch_metadata
+
+            fetch_metadata("dQw4w9WgXcQ")
+
+        content = self._read_log(log_file)
+        assert "Video metadata fetched in" in content
+        assert "Test Video" in content
+
+    def test_caption_download_logged(self, tmp_path):
+        """download_captions logs timing when successful."""
+        log_file = setup_logging(enabled=True, log_dir=str(tmp_path))
+
+        mock_info = {
+            "requested_subtitles": {
+                "en": {"data": "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello"},
+            },
+        }
+
+        with patch("yt_excel.youtube.yt_dlp.YoutubeDL") as mock_ydl_class:
+            mock_ydl = MagicMock()
+            mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+            mock_ydl.__exit__ = MagicMock(return_value=False)
+            mock_ydl.extract_info.return_value = mock_info
+            mock_ydl_class.return_value = mock_ydl
+
+            from yt_excel.youtube import download_captions
+
+            download_captions("dQw4w9WgXcQ", "en")
+
+        content = self._read_log(log_file)
+        assert "Captions downloaded in" in content
+        assert "lang=en" in content

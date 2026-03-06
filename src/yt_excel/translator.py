@@ -9,9 +9,10 @@ from dataclasses import dataclass
 from openai import OpenAI
 
 from yt_excel.config import TranslationConfig
+from yt_excel.logger import get_logger
 from yt_excel.vtt import Segment
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # System prompt template for translation requests
 _SYSTEM_PROMPT = (
@@ -337,6 +338,7 @@ def translate_batch_with_retry(
 
     expected_count = len(batch.translate_segments)
     last_error: Exception | None = None
+    batch_start = time.monotonic()
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -346,6 +348,14 @@ def translate_batch_with_retry(
             raw_content = call_translation_api(client, batch, model)
             translations = parse_translation_response(raw_content, expected_count)
             validated = validate_translations(translations, expected_count)
+            elapsed = time.monotonic() - batch_start
+            retry_count = attempt - 1
+            logger.info(
+                "Batch completed in %.1fs (%d segments%s)",
+                elapsed,
+                expected_count,
+                f", retry={retry_count}" if retry_count > 0 else "",
+            )
             return validated
 
         except RateLimitError as exc:
@@ -422,11 +432,21 @@ def translate_segments(
         context_after=config.context_after,
     )
 
+    logger.info(
+        "Translation started: %d batches (batch_size=%d, model=%s)",
+        len(batches), config.batch_size, config.model,
+    )
+    translation_start = time.monotonic()
+
     translated_segments: list[Segment] = []
     success_count = 0
     failed_count = 0
 
-    for batch in batches:
+    for batch_idx, batch in enumerate(batches, 1):
+        logger.info(
+            "Batch %d/%d started (%d segments)",
+            batch_idx, len(batches), len(batch.translate_segments),
+        )
         translations = translate_batch_with_retry(
             client=client,
             batch=batch,
@@ -448,6 +468,12 @@ def translate_segments(
                 success_count += 1
             else:
                 failed_count += 1
+
+    translation_elapsed = time.monotonic() - translation_start
+    logger.info(
+        "Translation complete: %d success, %d failed in %.1fs",
+        success_count, failed_count, translation_elapsed,
+    )
 
     return TranslationResult(
         segments=translated_segments,
