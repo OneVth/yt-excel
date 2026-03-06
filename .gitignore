@@ -20,5 +20,5 @@ Desktop.ini
 .DS_Store
 
 # Project-specific
-Master.xlsx
+*.xlsx
 .env
