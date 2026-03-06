@@ -31,6 +31,7 @@ yt-excel/
 ├── .env.example           # 필요한 환경 변수 안내 (커밋 대상)
 ├── CLAUDE.md              # 이 파일
 ├── README.md
+├── logs/                  # 실행 로그 (gitignore 대상, 자동 생성)
 ├── docs/
 │   ├── youtube_master_excel_cli_design_final.md   # 설계 문서
 │   └── Roadmap.md                                  # 구현 로드맵
@@ -40,9 +41,10 @@ yt-excel/
 │       ├── cli.py          # CLI 엔트리포인트, 파이프라인 오케스트레이션
 │       ├── config.py       # config.yaml 로딩, 기본값 관리
 │       ├── environment.py  # API 키 검증 (.env 로딩 + 환경 변수 확인)
+│       ├── logger.py       # 파일 로그 시스템 (logging 설정, 핸들러)
 │       ├── youtube.py      # URL 파싱, 메타데이터 조회, 자막 다운로드
 │       ├── vtt.py          # VTT 파싱, 마크업 strip, 세그먼트 정제
-│       ├── translator.py   # Sliding Window 배치 번역
+│       ├── translator.py   # Sliding Window 배치 번역 (동기 + 비동기)
 │       ├── excel.py        # Excel 읽기/쓰기, 스타일, 초기화, 무결성 검증
 │       └── retry.py        # 공통 retry 데코레이터/유틸리티
 └── tests/
@@ -388,14 +390,45 @@ docs: update design doc with file lock pre-validation
 
 ### 브랜치
 
-- `main`: 안정 버전
-- `dev`: 개발 통합 브랜치
-- `feat/<phase>-<설명>`: Phase별 기능 브랜치
+**브랜치 전략: feature → dev → main**
+
+main에 직접 커밋하지 않는다. 반드시 기능 브랜치 → dev → main 순서를 거친다.
 
 ```
-feat/phase-0-scaffolding
-feat/phase-2-caption-download
-feat/phase-4-translation-engine
+main (안정 — 직접 커밋 금지)
+  └── dev (통합 — 기능 검증 후 main에 merge)
+        ├── feat/logging-system
+        ├── feat/async-translation
+        └── fix/batch-retry-timeout
+```
+
+| 브랜치 | 역할 | merge 규칙 |
+|--------|------|------------|
+| `main` | 안정 버전, 배포 가능 상태 | dev에서만 merge, 직접 커밋 금지 |
+| `dev` | 개발 통합, 기능 검증 | feat/fix 브랜치에서 merge |
+| `feat/<설명>` | 새 기능 개발 | 기능 완료 + 테스트 통과 후 dev에 merge |
+| `fix/<설명>` | 버그 수정 | 수정 완료 + 테스트 통과 후 dev에 merge |
+
+**워크플로우:**
+
+```
+1. dev에서 기능 브랜치 생성
+   git checkout dev
+   git checkout -b feat/logging-system
+
+2. 기능 브랜치에서 기능 단위 커밋
+   (구현 + 테스트 함께)
+
+3. dev에 merge
+   git checkout dev
+   git merge feat/logging-system
+
+4. dev에서 통합 테스트 확인
+   uv run pytest
+
+5. 문제 없으면 main에 merge
+   git checkout main
+   git merge dev
 ```
 
 ---
@@ -405,6 +438,7 @@ feat/phase-4-translation-engine
 | 문서 | 위치 | 설명 |
 |------|------|------|
 | 설계 문서 (Final) | `docs/youtube_master_excel_cli_design_final.md` | 전체 설계 명세 |
+| v1.1 개선 설계 | `docs/v1.1_improvement_design.md` | 로그 시스템 + 비동기 번역 설계 |
 | 구현 로드맵 | `docs/Roadmap.md` | Phase별 구현 계획 및 완료 조건 |
 | 이 파일 | `CLAUDE.md` | 코딩 컨벤션 및 전역 규칙 (프로젝트 루트) |
 
@@ -424,3 +458,5 @@ feat/phase-4-translation-engine
 - ❌ bare `except:` 로 모든 예외를 삼키지 않는다.
 - ❌ 시트 이름을 sanitize 없이 사용하지 않는다.
 - ❌ `print()` 를 직접 호출하지 않는다 — 출력 유틸리티 사용.
+- ❌ main 브랜치에 직접 커밋하지 않는다 — 반드시 feat → dev → main 순서.
+- ❌ 로그 파일에 API 키를 기록하지 않는다.
