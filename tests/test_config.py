@@ -17,6 +17,8 @@ class TestLoadConfigDefaults:
         assert config.translation.context_after == 3
         assert config.translation.request_interval_ms == 200
         assert config.translation.max_retries == 3
+        assert config.translation.async_enabled is True
+        assert config.translation.max_concurrent_batches == 3
 
     def test_default_filter_values(self, tmp_path):
         config = load_config(tmp_path / "nonexistent.yaml")
@@ -121,3 +123,43 @@ class TestLoadConfigEdgeCases:
         config = load_config(cfg_file)
         assert config.translation.model == "gpt-5-nano"  # default preserved
         assert config.filter.min_text_length == 5
+
+
+class TestAsyncTranslationConfig:
+    """Tests for async translation configuration fields."""
+
+    def test_async_enabled_default_true(self, tmp_path):
+        config = load_config(tmp_path / "nonexistent.yaml")
+        assert config.translation.async_enabled is True
+
+    def test_async_enabled_override_false(self, tmp_path):
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("translation:\n  async_enabled: false\n")
+        config = load_config(cfg_file)
+        assert config.translation.async_enabled is False
+
+    def test_max_concurrent_batches_default(self, tmp_path):
+        config = load_config(tmp_path / "nonexistent.yaml")
+        assert config.translation.max_concurrent_batches == 3
+
+    def test_max_concurrent_batches_override(self, tmp_path):
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("translation:\n  max_concurrent_batches: 5\n")
+        config = load_config(cfg_file)
+        assert config.translation.max_concurrent_batches == 5
+
+    def test_async_fields_with_other_translation_fields(self, tmp_path):
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text(
+            "translation:\n"
+            "  model: gpt-5-mini\n"
+            "  async_enabled: false\n"
+            "  max_concurrent_batches: 10\n"
+        )
+        config = load_config(cfg_file)
+        assert config.translation.model == "gpt-5-mini"
+        assert config.translation.async_enabled is False
+        assert config.translation.max_concurrent_batches == 10
+        # Other defaults preserved
+        assert config.translation.batch_size == 10
+        assert config.translation.max_retries == 3

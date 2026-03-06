@@ -6,6 +6,8 @@ translation:
   context_after: 3              # 뒤쪽 컨텍스트 세그먼트 수
   request_interval_ms: 200      # API 요청 간 최소 대기 (ms)
   max_retries: 3                # 배치별 최대 재시도
+  async_enabled: true            # 비동기 번역 활성화 (기본: true)
+  max_concurrent_batches: 3      # 동시 배치 수
 
 # 필터링 설정
 filter:

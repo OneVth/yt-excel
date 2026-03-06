@@ -17,6 +17,8 @@ class TranslationConfig:
     context_after: int = 3
     request_interval_ms: int = 200
     max_retries: int = 3
+    async_enabled: bool = True
+    max_concurrent_batches: int = 3
 
 
 @dataclass
