@@ -1,7 +1,8 @@
 """Tests for the translation engine."""
 
+import asyncio
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -13,9 +14,12 @@ from yt_excel.translator import (
     build_system_prompt,
     build_user_message,
     call_translation_api,
+    call_translation_api_async,
     parse_translation_response,
     translate_batch_with_retry,
+    translate_batch_with_retry_async,
     translate_segments,
+    translate_segments_async,
     validate_translations,
 )
 from yt_excel.vtt import Segment
@@ -494,3 +498,271 @@ class TestTranslateSegments:
         assert result.failed_count == 3
         for seg in result.segments:
             assert seg.korean == ""
+
+
+# --- Async Translation Tests ---
+
+
+def _make_async_response(translations: list[str]) -> MagicMock:
+    """Create a mock response object for async API calls."""
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = json.dumps(
+        {"translations": translations}
+    )
+    return mock_response
+
+
+def _make_async_client(translations: list[str]) -> MagicMock:
+    """Create a mock AsyncOpenAI client returning given translations."""
+    mock_client = MagicMock()
+    mock_response = _make_async_response(translations)
+    mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+    return mock_client
+
+
+class TestCallTranslationApiAsync:
+    """Tests for async API calling function."""
+
+    @pytest.mark.asyncio
+    async def test_calls_async_openai_correctly(self) -> None:
+        mock_client = _make_async_client(["안녕하세요"])
+        batch = Batch(
+            translate_segments=[_make_segment(1, "Hello")],
+            context_before=[],
+            context_after=[],
+        )
+        result = await call_translation_api_async(mock_client, batch, "gpt-5-nano")
+        parsed = json.loads(result)
+        assert parsed["translations"] == ["안녕하세요"]
+        mock_client.chat.completions.create.assert_awaited_once()
+        call_kwargs = mock_client.chat.completions.create.call_args[1]
+        assert call_kwargs["model"] == "gpt-5-nano"
+        assert call_kwargs["response_format"] == {"type": "json_object"}
+
+
+class TestTranslateBatchWithRetryAsync:
+    """Tests for async batch retry logic."""
+
+    @pytest.mark.asyncio
+    @patch("yt_excel.translator.asyncio.sleep", new_callable=AsyncMock)
+    async def test_successful_translation(self, mock_sleep: AsyncMock) -> None:
+        mock_client = _make_async_client(["안녕"])
+        batch = Batch(
+            translate_segments=[_make_segment(1, "Hello")],
+            context_before=[],
+            context_after=[],
+        )
+        idx, result = await translate_batch_with_retry_async(
+            mock_client, batch, batch_idx=0, total_batches=1,
+            model="gpt-5-nano", max_retries=3, request_interval_ms=0,
+        )
+        assert idx == 0
+        assert result == ["안녕"]
+
+    @pytest.mark.asyncio
+    @patch("yt_excel.translator.asyncio.sleep", new_callable=AsyncMock)
+    async def test_returns_batch_index_for_ordering(self, mock_sleep: AsyncMock) -> None:
+        mock_client = _make_async_client(["결과"])
+        batch = Batch(
+            translate_segments=[_make_segment(1, "Test")],
+            context_before=[],
+            context_after=[],
+        )
+        idx, result = await translate_batch_with_retry_async(
+            mock_client, batch, batch_idx=5, total_batches=10,
+            model="gpt-5-nano", max_retries=3, request_interval_ms=0,
+        )
+        assert idx == 5
+        assert result == ["결과"]
+
+    @pytest.mark.asyncio
+    @patch("yt_excel.translator.asyncio.sleep", new_callable=AsyncMock)
+    async def test_all_retries_exhausted_returns_empty(self, mock_sleep: AsyncMock) -> None:
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(
+            side_effect=ValueError("parse error")
+        )
+        batch = Batch(
+            translate_segments=[_make_segment(1, "Hello"), _make_segment(2, "World")],
+            context_before=[],
+            context_after=[],
+        )
+        idx, result = await translate_batch_with_retry_async(
+            mock_client, batch, batch_idx=0, total_batches=1,
+            model="gpt-5-nano", max_retries=3, request_interval_ms=0,
+        )
+        assert idx == 0
+        assert result == ["", ""]
+        assert mock_client.chat.completions.create.await_count == 3
+
+
+class TestTranslateSegmentsAsync:
+    """Tests for the full async translation pipeline."""
+
+    @pytest.mark.asyncio
+    @patch("yt_excel.translator.asyncio.sleep", new_callable=AsyncMock)
+    async def test_translates_all_segments(self, mock_sleep: AsyncMock) -> None:
+        segments = _make_segments(3)
+        config = TranslationConfig(
+            model="gpt-5-nano",
+            batch_size=10,
+            context_before=3,
+            context_after=3,
+            request_interval_ms=0,
+            max_retries=3,
+            max_concurrent_batches=3,
+        )
+        mock_client = _make_async_client(["번역1", "번역2", "번역3"])
+        result = await translate_segments_async(mock_client, segments, config)
+        assert result.success_count == 3
+        assert result.failed_count == 0
+        assert len(result.segments) == 3
+        assert result.segments[0].korean == "번역1"
+        assert result.segments[2].korean == "번역3"
+
+    @pytest.mark.asyncio
+    @patch("yt_excel.translator.asyncio.sleep", new_callable=AsyncMock)
+    async def test_result_order_preserved_across_batches(
+        self, mock_sleep: AsyncMock,
+    ) -> None:
+        """Ensure segments are ordered by index even with concurrent batches."""
+        segments = _make_segments(15)
+        config = TranslationConfig(
+            model="gpt-5-nano",
+            batch_size=5,
+            context_before=2,
+            context_after=2,
+            request_interval_ms=0,
+            max_retries=3,
+            max_concurrent_batches=3,
+        )
+        # Each batch of 5 gets unique translations
+        call_count = 0
+        batch_translations = [
+            ["번역1", "번역2", "번역3", "번역4", "번역5"],
+            ["번역6", "번역7", "번역8", "번역9", "번역10"],
+            ["번역11", "번역12", "번역13", "번역14", "번역15"],
+        ]
+
+        async def mock_create(**kwargs):
+            nonlocal call_count
+            user_msg = kwargs["messages"][1]["content"]
+            # Determine which batch based on first segment index in message
+            for i, trans in enumerate(batch_translations):
+                expected_idx = i * 5 + 1
+                if f"[TRANSLATE] {expected_idx}:" in user_msg:
+                    return _make_async_response(trans).choices[0].message
+            # Fallback
+            idx = call_count
+            call_count += 1
+            resp = _make_async_response(batch_translations[idx % 3])
+            return resp
+
+        # Simpler approach: return different responses per call
+        responses = [
+            _make_async_response(t) for t in batch_translations
+        ]
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(side_effect=responses)
+
+        result = await translate_segments_async(mock_client, segments, config)
+        assert len(result.segments) == 15
+        # Verify segments are in correct order
+        for i, seg in enumerate(result.segments):
+            assert seg.index == i + 1
+            assert seg.korean == f"번역{i + 1}"
+
+    @pytest.mark.asyncio
+    @patch("yt_excel.translator.asyncio.sleep", new_callable=AsyncMock)
+    async def test_concurrency_limited_by_semaphore(
+        self, mock_sleep: AsyncMock,
+    ) -> None:
+        """Verify that max_concurrent_batches limits concurrency."""
+        segments = _make_segments(30)
+        config = TranslationConfig(
+            model="gpt-5-nano",
+            batch_size=10,
+            context_before=3,
+            context_after=3,
+            request_interval_ms=0,
+            max_retries=3,
+            max_concurrent_batches=2,
+        )
+
+        concurrent_count = 0
+        max_concurrent = 0
+
+        async def mock_create(**kwargs):
+            nonlocal concurrent_count, max_concurrent
+            concurrent_count += 1
+            max_concurrent = max(max_concurrent, concurrent_count)
+            await asyncio.sleep(0)  # Yield to event loop
+            concurrent_count -= 1
+            return _make_async_response(
+                ["ok"] * 10
+            )
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(side_effect=mock_create)
+
+        result = await translate_segments_async(mock_client, segments, config)
+        assert result.success_count == 30
+        assert max_concurrent <= 2
+
+    @pytest.mark.asyncio
+    @patch("yt_excel.translator.asyncio.sleep", new_callable=AsyncMock)
+    async def test_failed_batch_does_not_affect_others(
+        self, mock_sleep: AsyncMock,
+    ) -> None:
+        segments = _make_segments(20)
+        config = TranslationConfig(
+            model="gpt-5-nano",
+            batch_size=10,
+            context_before=3,
+            context_after=3,
+            request_interval_ms=0,
+            max_retries=1,
+            max_concurrent_batches=2,
+        )
+        # First call fails, second succeeds
+        call_count = 0
+
+        async def mock_create(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ValueError("parse error")
+            return _make_async_response(["성공"] * 10)
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(side_effect=mock_create)
+
+        result = await translate_segments_async(mock_client, segments, config)
+        assert result.success_count == 10
+        assert result.failed_count == 10
+
+    @pytest.mark.asyncio
+    @patch("yt_excel.translator.asyncio.sleep", new_callable=AsyncMock)
+    async def test_on_batch_complete_callback(self, mock_sleep: AsyncMock) -> None:
+        segments = _make_segments(15)
+        config = TranslationConfig(
+            model="gpt-5-nano",
+            batch_size=5,
+            context_before=2,
+            context_after=2,
+            request_interval_ms=0,
+            max_retries=3,
+            max_concurrent_batches=3,
+        )
+        mock_client = MagicMock()
+        responses = [_make_async_response(["ok"] * 5) for _ in range(3)]
+        mock_client.chat.completions.create = AsyncMock(side_effect=responses)
+
+        callback_counts: list[int] = []
+        result = await translate_segments_async(
+            mock_client, segments, config,
+            on_batch_complete=lambda count: callback_counts.append(count),
+        )
+        assert result.success_count == 15
+        assert callback_counts == [5, 5, 5]

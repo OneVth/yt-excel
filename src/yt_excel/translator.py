@@ -1,12 +1,14 @@
 """Translation engine using OpenAI API with sliding window batching."""
 
+import asyncio
 import json
 import logging
 import re
 import time
 from dataclasses import dataclass
+from typing import Callable
 
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 
 from yt_excel.config import TranslationConfig
 from yt_excel.logger import get_logger
@@ -408,6 +410,224 @@ def _extract_retry_after(exc: Exception) -> float:
     except (ValueError, AttributeError):
         pass
     return 0.0
+
+
+def create_async_client(api_key: str) -> AsyncOpenAI:
+    """Create an AsyncOpenAI client instance.
+
+    Args:
+        api_key: The OpenAI API key.
+
+    Returns:
+        Configured AsyncOpenAI client.
+    """
+    return AsyncOpenAI(api_key=api_key)
+
+
+async def call_translation_api_async(
+    client: AsyncOpenAI,
+    batch: Batch,
+    model: str,
+) -> str:
+    """Call the OpenAI API asynchronously for a single translation batch.
+
+    Args:
+        client: AsyncOpenAI client instance.
+        batch: Batch containing segments to translate and context.
+        model: Model name to use for translation.
+
+    Returns:
+        Raw response content string from the API.
+    """
+    translate_count = len(batch.translate_segments)
+    system_prompt = build_system_prompt(translate_count)
+    user_message = build_user_message(
+        batch.translate_segments,
+        batch.context_before,
+        batch.context_after,
+    )
+
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+        response_format={"type": "json_object"},
+    )
+
+    return response.choices[0].message.content or ""
+
+
+async def translate_batch_with_retry_async(
+    client: AsyncOpenAI,
+    batch: Batch,
+    batch_idx: int,
+    total_batches: int,
+    model: str,
+    max_retries: int = 3,
+    request_interval_ms: int = 200,
+) -> tuple[int, list[str]]:
+    """Translate a single batch asynchronously with retry logic.
+
+    Args:
+        client: AsyncOpenAI client instance.
+        batch: Batch to translate.
+        batch_idx: Zero-based batch index (for result ordering).
+        total_batches: Total number of batches (for logging).
+        model: Model name.
+        max_retries: Maximum retry attempts per batch.
+        request_interval_ms: Minimum interval between requests in ms.
+
+    Returns:
+        Tuple of (batch_idx, translations) for ordering results.
+    """
+    from openai import APIConnectionError, APITimeoutError, RateLimitError
+
+    expected_count = len(batch.translate_segments)
+    last_error: Exception | None = None
+    batch_start = time.monotonic()
+    batch_num = batch_idx + 1
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            await asyncio.sleep(request_interval_ms / 1000.0)
+
+            raw_content = await call_translation_api_async(client, batch, model)
+            translations = parse_translation_response(raw_content, expected_count)
+            validated = validate_translations(translations, expected_count)
+            elapsed = time.monotonic() - batch_start
+            retry_count = attempt - 1
+            logger.info(
+                "Batch %d/%d completed in %.1fs (%d segments%s)",
+                batch_num, total_batches, elapsed, expected_count,
+                f", retry={retry_count}" if retry_count > 0 else "",
+            )
+            return (batch_idx, validated)
+
+        except RateLimitError as exc:
+            last_error = exc
+            retry_after = _extract_retry_after(exc)
+            wait_time = retry_after if retry_after > 0 else (1.0 * (2 ** (attempt - 1)))
+            logger.warning(
+                "Rate limited (429) on batch %d/%d attempt %d/%d. Waiting %.1fs.",
+                batch_num, total_batches, attempt, max_retries, wait_time,
+            )
+            await asyncio.sleep(wait_time)
+
+        except (APIConnectionError, APITimeoutError) as exc:
+            last_error = exc
+            wait_time = 1.0 * (2 ** (attempt - 1))
+            logger.warning(
+                "Network error on batch %d/%d attempt %d/%d: %s. Retrying in %.1fs.",
+                batch_num, total_batches, attempt, max_retries,
+                type(exc).__name__, wait_time,
+            )
+            await asyncio.sleep(wait_time)
+
+        except ValueError as exc:
+            last_error = exc
+            wait_time = 1.0 * (2 ** (attempt - 1))
+            logger.warning(
+                "Validation error on batch %d/%d attempt %d/%d: %s. Retrying in %.1fs.",
+                batch_num, total_batches, attempt, max_retries, exc, wait_time,
+            )
+            await asyncio.sleep(wait_time)
+
+    logger.error(
+        "Batch %d/%d translation failed after %d attempts. Last error: %s. "
+        "Leaving %d segments untranslated.",
+        batch_num, total_batches, max_retries, last_error, expected_count,
+    )
+    return (batch_idx, [""] * expected_count)
+
+
+async def translate_segments_async(
+    client: AsyncOpenAI,
+    segments: list[Segment],
+    config: TranslationConfig,
+    on_batch_complete: Callable[[int], None] | None = None,
+) -> TranslationResult:
+    """Translate all segments using async batching with concurrency control.
+
+    Args:
+        client: AsyncOpenAI client instance.
+        segments: All processed segments to translate.
+        config: Translation configuration.
+        on_batch_complete: Optional callback called with segment count after each batch.
+
+    Returns:
+        TranslationResult with translated segments and success/failure counts.
+    """
+    batches = build_batches(
+        segments,
+        batch_size=config.batch_size,
+        context_before=config.context_before,
+        context_after=config.context_after,
+    )
+
+    total_batches = len(batches)
+    logger.info(
+        "Async translation started: %d batches (batch_size=%d, model=%s, "
+        "max_concurrent=%d)",
+        total_batches, config.batch_size, config.model,
+        config.max_concurrent_batches,
+    )
+    translation_start = time.monotonic()
+
+    semaphore = asyncio.Semaphore(config.max_concurrent_batches)
+
+    async def _run_batch(idx: int, batch: Batch) -> tuple[int, list[str]]:
+        async with semaphore:
+            return await translate_batch_with_retry_async(
+                client=client,
+                batch=batch,
+                batch_idx=idx,
+                total_batches=total_batches,
+                model=config.model,
+                max_retries=config.max_retries,
+                request_interval_ms=config.request_interval_ms,
+            )
+
+    tasks = [_run_batch(idx, batch) for idx, batch in enumerate(batches)]
+    results = await asyncio.gather(*tasks)
+
+    # Sort by batch index to ensure correct segment ordering
+    results.sort(key=lambda r: r[0])
+
+    translated_segments: list[Segment] = []
+    success_count = 0
+    failed_count = 0
+
+    for batch_idx, translations in results:
+        batch = batches[batch_idx]
+        for seg, korean in zip(batch.translate_segments, translations):
+            translated_segments.append(Segment(
+                index=seg.index,
+                start=seg.start,
+                end=seg.end,
+                english=seg.english,
+                korean=korean,
+            ))
+            if korean:
+                success_count += 1
+            else:
+                failed_count += 1
+
+        if on_batch_complete is not None:
+            on_batch_complete(len(batch.translate_segments))
+
+    translation_elapsed = time.monotonic() - translation_start
+    logger.info(
+        "Async translation complete: %d success, %d failed in %.1fs",
+        success_count, failed_count, translation_elapsed,
+    )
+
+    return TranslationResult(
+        segments=translated_segments,
+        success_count=success_count,
+        failed_count=failed_count,
+    )
 
 
 def translate_segments(
