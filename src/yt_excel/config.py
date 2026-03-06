@@ -49,6 +49,15 @@ class UIConfig:
 
 
 @dataclass
+class LoggingConfig:
+    """File logging settings."""
+
+    enabled: bool = True
+    dir: str = "./logs"
+    level: str = "DEBUG"
+
+
+@dataclass
 class AppConfig:
     """Top-level application configuration."""
 
@@ -57,6 +66,7 @@ class AppConfig:
     file: FileConfig = field(default_factory=FileConfig)
     style: StyleConfig = field(default_factory=StyleConfig)
     ui: UIConfig = field(default_factory=UIConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
 
 
 def _merge_section(dataclass_instance: Any, yaml_dict: dict[str, Any]) -> None:
@@ -94,6 +104,7 @@ def load_config(config_path: str | Path = "config.yaml") -> AppConfig:
         "file": config.file,
         "style": config.style,
         "ui": config.ui,
+        "logging": config.logging,
     }
 
     for section_name, dataclass_instance in section_map.items():
