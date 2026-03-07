@@ -172,6 +172,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Analyze captions without translating or saving",
     )
     parser.add_argument(
+        "--yes", "-y",
+        action="store_true",
+        help="Skip confirmation prompts and always proceed",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"yt-excel {__version__}",
@@ -261,6 +266,13 @@ def _run_pipeline(
     out.detail(f"Title: {meta.title}")
     out.detail(f"Channel: {meta.channel}")
     out.detail(f"Duration: {meta.duration}")
+
+    # --- Step 3.5: Duration threshold check ---
+    _check_duration_threshold(
+        meta, config, out,
+        yes_flag=args.yes,
+        dry_run=args.dry_run,
+    )
 
     # --- Step 4: Check captions ---
     out.step("\U0001f4dd", "Checking captions...")
@@ -600,6 +612,146 @@ def _translate_async_with_progress(
         )
 
     return result
+
+
+def _parse_duration_to_seconds(duration: str) -> int:
+    """Parse HH:MM:SS duration string to total seconds.
+
+    Args:
+        duration: Duration in "HH:MM:SS" format.
+
+    Returns:
+        Total seconds as integer.
+    """
+    parts = duration.split(":")
+    if len(parts) == 3:
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+    if len(parts) == 2:
+        return int(parts[0]) * 60 + int(parts[1])
+    return int(parts[0])
+
+
+def _format_duration_human(total_seconds: int) -> str:
+    """Format seconds into human-readable duration (e.g. '1h 30m 00s').
+
+    Args:
+        total_seconds: Duration in seconds.
+
+    Returns:
+        Human-readable duration string.
+    """
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    if hours > 0:
+        return f"{hours}h {minutes:02d}m {seconds:02d}s"
+    return f"{minutes}m {seconds:02d}s"
+
+
+def _check_duration_threshold(
+    meta: VideoMeta,
+    config: AppConfig,
+    out: Output,
+    *,
+    yes_flag: bool = False,
+    dry_run: bool = False,
+) -> None:
+    """Check video duration against threshold and prompt user if exceeded.
+
+    Args:
+        meta: Video metadata containing duration.
+        config: Application configuration.
+        out: Output utility instance.
+        yes_flag: If True, skip confirmation and proceed.
+        dry_run: If True, skip confirmation (no API cost).
+
+    Raises:
+        SystemExit: If user declines or quiet mode auto-aborts.
+    """
+    max_minutes = config.filter.max_duration_minutes
+    if max_minutes == 0:
+        _logger.debug("Duration check: disabled (max_duration_minutes=0)")
+        return
+
+    total_seconds = _parse_duration_to_seconds(meta.duration)
+    duration_minutes = total_seconds / 60
+    threshold_seconds = max_minutes * 60
+
+    if total_seconds <= threshold_seconds:
+        _logger.debug(
+            "Duration check: %.1fmin within threshold %dmin",
+            duration_minutes, max_minutes,
+        )
+        return
+
+    human_duration = _format_duration_human(total_seconds)
+
+    if dry_run:
+        _logger.info(
+            "Duration check: %.1fmin exceeds threshold %dmin, "
+            "skipping prompt (--dry-run)",
+            duration_minutes, max_minutes,
+        )
+        return
+
+    if yes_flag:
+        _logger.info(
+            "Duration check: %.1fmin exceeds threshold %dmin, "
+            "auto-confirmed (--yes flag)",
+            duration_minutes, max_minutes,
+        )
+        out.warning(
+            f"This video is {human_duration} long (threshold: {max_minutes}m) "
+            f"-- auto-confirmed (--yes flag)"
+        )
+        return
+
+    if out.mode == "quiet":
+        _logger.info(
+            "Duration check: %.1fmin exceeds threshold %dmin, "
+            "auto-aborted (quiet mode)",
+            duration_minutes, max_minutes,
+        )
+        out.error(
+            f"Video is {human_duration} long (threshold: {max_minutes}m). "
+            f"Use --yes to proceed or increase max_duration_minutes in config."
+        )
+        sys.exit(1)
+
+    # Interactive prompt
+    _logger.info(
+        "Duration check: %.1fmin exceeds threshold %dmin, prompting user",
+        duration_minutes, max_minutes,
+    )
+
+    estimated_segments = int(duration_minutes * 10)
+    estimated_cost = _estimate_cost(estimated_segments, config.translation.model)
+
+    _console.print(
+        f"\n[yellow]\u26a0 This video is {human_duration} long "
+        f"(threshold: {max_minutes}m).[/yellow]"
+    )
+    _console.print(
+        f"   Estimated segments: ~{estimated_segments} "
+        f"(based on 10 seg/min average)"
+    )
+    _console.print(
+        f"   Estimated cost: ~${estimated_cost:.3f} "
+        f"({config.translation.model})"
+    )
+    _console.print()
+
+    try:
+        answer = input("   Continue translation? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+
+    if answer == "y":
+        _logger.info("User confirmed: proceeding with long video")
+    else:
+        _logger.info("User declined: aborting")
+        out.info("Aborted by user.")
+        sys.exit(1)
 
 
 def _estimate_cost(segment_count: int, model: str) -> float:
