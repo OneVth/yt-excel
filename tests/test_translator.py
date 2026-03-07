@@ -771,33 +771,21 @@ class TestTranslateSegmentsAsync:
             max_concurrent_batches=3,
         )
         # Each batch of 5 gets unique translations
-        call_count = 0
-        batch_translations = [
-            ["번역1", "번역2", "번역3", "번역4", "번역5"],
-            ["번역6", "번역7", "번역8", "번역9", "번역10"],
-            ["번역11", "번역12", "번역13", "번역14", "번역15"],
-        ]
+        batch_translations = {
+            1: ["번역1", "번역2", "번역3", "번역4", "번역5"],
+            6: ["번역6", "번역7", "번역8", "번역9", "번역10"],
+            11: ["번역11", "번역12", "번역13", "번역14", "번역15"],
+        }
 
         async def mock_create(**kwargs):
-            nonlocal call_count
             user_msg = kwargs["messages"][1]["content"]
-            # Determine which batch based on first segment index in message
-            for i, trans in enumerate(batch_translations):
-                expected_idx = i * 5 + 1
-                if f"[TRANSLATE] {expected_idx}:" in user_msg:
-                    return _make_async_response(trans).choices[0].message
-            # Fallback
-            idx = call_count
-            call_count += 1
-            resp = _make_async_response(batch_translations[idx % 3])
-            return resp
+            for start_idx, trans in batch_translations.items():
+                if f"[TRANSLATE] {start_idx}:" in user_msg:
+                    return _make_async_response(trans)
+            return _make_async_response(["fallback"] * 5)
 
-        # Simpler approach: return different responses per call
-        responses = [
-            _make_async_response(t) for t in batch_translations
-        ]
         mock_client = MagicMock()
-        mock_client.chat.completions.create = AsyncMock(side_effect=responses)
+        mock_client.chat.completions.create = AsyncMock(side_effect=mock_create)
 
         result = await translate_segments_async(mock_client, segments, config)
         assert len(result.segments) == 15
@@ -899,3 +887,63 @@ class TestTranslateSegmentsAsync:
         )
         assert result.success_count == 15
         assert callback_counts == [5, 5, 5]
+
+    @pytest.mark.asyncio
+    async def test_on_batch_complete_called_immediately_per_batch(self) -> None:
+        """Verify on_batch_complete is called as each batch completes, not all at once.
+
+        Uses asyncio.Event to control when each batch's API call completes,
+        proving that callbacks fire incrementally (as_completed) rather than
+        all at the end (gather). No asyncio.sleep mock so real event loop
+        yielding works correctly.
+        """
+        segments = _make_segments(10)
+        config = TranslationConfig(
+            model="gpt-5-nano",
+            batch_size=5,
+            context_before=2,
+            context_after=2,
+            request_interval_ms=0,
+            max_retries=3,
+            max_concurrent_batches=2,
+        )
+
+        # Events to control when each batch's API call completes
+        batch_events = [asyncio.Event(), asyncio.Event()]
+        create_call_count = 0
+
+        async def mock_create(**kwargs):
+            nonlocal create_call_count
+            idx = create_call_count
+            create_call_count += 1
+            await batch_events[idx].wait()
+            return _make_async_response(["ok"] * 5)
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(side_effect=mock_create)
+
+        callback_counts: list[int] = []
+
+        task = asyncio.create_task(
+            translate_segments_async(
+                mock_client, segments, config,
+                on_batch_complete=lambda c: callback_counts.append(c),
+            )
+        )
+
+        # Let tasks start and reach the event waits
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert len(callback_counts) == 0  # No batches completed yet
+
+        # Complete first batch — callback should fire before second batch completes
+        batch_events[0].set()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert len(callback_counts) == 1  # Immediate callback for first batch
+
+        # Complete second batch
+        batch_events[1].set()
+        result = await task
+        assert len(callback_counts) == 2
+        assert result.success_count == 10

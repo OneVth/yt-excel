@@ -590,7 +590,15 @@ async def translate_segments_async(
             )
 
     tasks = [_run_batch(idx, batch) for idx, batch in enumerate(batches)]
-    results = await asyncio.gather(*tasks)
+
+    # Use as_completed() to call on_batch_complete immediately as each batch finishes
+    results: list[tuple[int, list[str]]] = []
+    for coro in asyncio.as_completed(tasks):
+        result = await coro
+        results.append(result)
+        if on_batch_complete is not None:
+            batch_idx = result[0]
+            on_batch_complete(len(batches[batch_idx].translate_segments))
 
     # Sort by batch index to ensure correct segment ordering
     results.sort(key=lambda r: r[0])
@@ -613,9 +621,6 @@ async def translate_segments_async(
                 success_count += 1
             else:
                 failed_count += 1
-
-        if on_batch_complete is not None:
-            on_batch_complete(len(batch.translate_segments))
 
     translation_elapsed = time.monotonic() - translation_start
     logger.info(
