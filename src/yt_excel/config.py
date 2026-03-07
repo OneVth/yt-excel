@@ -27,6 +27,7 @@ class FilterConfig:
 
     min_duration_sec: float = 0.5
     min_text_length: int = 2
+    max_duration_minutes: int = 15
 
 
 @dataclass

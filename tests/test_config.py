@@ -24,6 +24,7 @@ class TestLoadConfigDefaults:
         config = load_config(tmp_path / "nonexistent.yaml")
         assert config.filter.min_duration_sec == 0.5
         assert config.filter.min_text_length == 2
+        assert config.filter.max_duration_minutes == 15
 
     def test_default_file_values(self, tmp_path):
         config = load_config(tmp_path / "nonexistent.yaml")
@@ -123,6 +124,34 @@ class TestLoadConfigEdgeCases:
         config = load_config(cfg_file)
         assert config.translation.model == "gpt-5-nano"  # default preserved
         assert config.filter.min_text_length == 5
+
+
+class TestMaxDurationMinutesConfig:
+    """Tests for max_duration_minutes configuration field."""
+
+    def test_default_value_is_15(self, tmp_path):
+        config = load_config(tmp_path / "nonexistent.yaml")
+        assert config.filter.max_duration_minutes == 15
+
+    def test_override_from_yaml(self, tmp_path):
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("filter:\n  max_duration_minutes: 30\n")
+        config = load_config(cfg_file)
+        assert config.filter.max_duration_minutes == 30
+
+    def test_zero_disables_check(self, tmp_path):
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("filter:\n  max_duration_minutes: 0\n")
+        config = load_config(cfg_file)
+        assert config.filter.max_duration_minutes == 0
+
+    def test_preserves_other_filter_defaults(self, tmp_path):
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text("filter:\n  max_duration_minutes: 60\n")
+        config = load_config(cfg_file)
+        assert config.filter.max_duration_minutes == 60
+        assert config.filter.min_duration_sec == 0.5
+        assert config.filter.min_text_length == 2
 
 
 class TestAsyncTranslationConfig:

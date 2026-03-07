@@ -13,6 +13,7 @@ translation:
 filter:
   min_duration_sec: 0.5         # 최소 세그먼트 길이 (초)
   min_text_length: 2            # 최소 텍스트 길이 (문자)
+  max_duration_minutes: 15      # 확인 없이 진행 가능한 최대 영상 길이 (분, 0=비활성화)
 
 # 파일 설정
 file:
